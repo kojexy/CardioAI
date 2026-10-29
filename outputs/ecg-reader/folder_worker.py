@@ -148,6 +148,8 @@ class FolderWorker:
 
     def stop(self):
         self.stop_event.set()
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=30)  # let a scan in progress finish
 
     def running(self):
         return bool(self.thread and self.thread.is_alive() and not self.stop_event.is_set())
