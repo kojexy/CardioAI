@@ -2,7 +2,7 @@
 import { LEADS, ASSUMED, parseECG301, sha256Hex } from './ecg301.js';
 import { deriveMeasurements, ageAt } from './measure.js';
 import { compareRecords, autoComparisons, trend, sustainedTrends, rangeStatus, normalRange, LEVEL_TEXT } from './compare.js';
-import { RULES, MEASURE_LABELS } from './rules.js';
+import { RULES, MEASURE_LABELS, LABEL_GROUP_OF } from './rules.js';
 import { openStore, newId, exportAll, importAll } from './store.js';
 import { trendChart, beatOverlay, stripChart } from './charts.js';
 import { toMillivolts } from './signal.js';
@@ -177,12 +177,14 @@ const initials = p => [p.surname, p.name].map(s => (s || '').charAt(0)).join('')
 function fullName(p) { return [p.surname, p.name, p.middleName].filter(Boolean).join(' ') || 'Без имени'; }
 function val(v, unit) {
   if (!Number.isFinite(v)) return '—';
-  return (Number.isInteger(v) ? v : Math.round(v * 100) / 100) + (unit === '°' ? '°' : unit ? ' ' + unit : '');
+  return String(Number.isInteger(v) ? v : Math.round(v * 100) / 100).replace('.', ',') + (unit === '°' ? '°' : unit ? ' ' + unit : '');
 }
 function logitMargin(p, t) {
   const lg = x => { const q = Math.min(0.999, Math.max(0.001, x)); return Math.log(q / (1 - q)); };
   return lg(p) - lg(t);
 }
+const labelShort = label => h('span', { title: label }, state.labelsRu[label] || label);
+const dec = (v, d = 2) => Number(v).toFixed(d).replace('.', ',');
 function labelRu(label) { return state.labelsRu[label] ? `${state.labelsRu[label]} (${label})` : label; }
 function sortByDate(records) { return [...records].sort((a, b) => (b.recordedAt || '').localeCompare(a.recordedAt || '')); }
 const SOURCE = { ecg301: 'файл прибора ECG301', manual: 'введено вручную', import: 'файл CardioAI' };
@@ -409,11 +411,11 @@ async function viewPatient(id) {
           printButton('Сравнение ЭКГ ' + fullName(patient), ctx => comparisonReport(patient, c, ctx), 'Печать сравнения')));
     };
     if (tabs) for (const [key, label] of options) tabs.append(h('button', { type: 'button', role: 'tab', 'data-key': key, onclick: () => open(key) }, label));
-    parts.push(card(h('div', { class: 'card-head' }, h('h2', {}, tabs ? 'Сравнение последней ЭКГ' : 'Сравнение с предыдущей ЭКГ'), tabs), body));
+    parts.push(card(h('div', { class: 'card-head' }, h('h2', {}, 'Что изменилось'), tabs), body));
     open('previous');
   }
 
-  parts.push(recordsTable(patient, records));
+  parts.push(lastThreeCard(patient, records));
 
   const keys = ['QTcF_ms', 'heart_rate_bpm', 'PR_ms', 'QRS_ms', 'QTc_ms', 'QRS_axis', 'sokolow_mV', 'RR_cv_pct'];
   const charts = keys.map(k => [k, trend(records, k)]).filter(([, pts]) => pts.length >= 2)
@@ -424,37 +426,120 @@ async function viewPatient(id) {
     h('div', { class: 'fold-body' },
       sustained.length ? h('ul', { class: 'highlights' }, sustained.map(t => h('li', {}, pill('minor'), ` ${t.label}: ${t.direction === 'up' ? 'растёт' : 'снижается'} ${t.points - 1} раза подряд, всего ${t.total > 0 ? '+' : ''}${val(t.total, t.unit)}`))) : null,
       h('p', { class: 'muted' }, 'Зелёная полоса — ориентировочная норма для взрослых.'), h('div', { class: 'charts' }, charts))));
-  parts.push(notice(DISCLAIMER, 'info'));
+  parts.push(recordsTable(patient, records), notice(DISCLAIMER, 'info'));
   view.replaceChildren(...parts.filter(Boolean));
 }
 
-// The newest ECG with its key values: the first thing a doctor looks for.
+// How many measurements of an ECG are outside the reference range.
+function outsideCount(r, sex) {
+  return RULES.measurements.filter(m => { const st = rangeStatus(r.measurements?.[m.key], m, sex); return st && st !== 'normal'; }).length;
+}
+
+// Labels of one network's result, best first: above the authors' thresholds when they exist, else the top 10 scores.
+function aiAbove(entry) {
+  const t = entry.thresholds || null;
+  const ranked = t
+    ? Object.entries(entry.scores).filter(([l]) => t[l]).map(([l, v]) => [l, v, logitMargin(v, t[l])]).sort((a, b) => b[2] - a[2])
+    : Object.entries(entry.scores).sort((a, b) => b[1] - a[1]).map(([l, v]) => [l, v, null]);
+  return { t, ranked, above: t ? ranked.filter(r => r[2] > 0) : ranked.slice(0, 10) };
+}
+
+// Short AI summary for the profile: top labels above the authors' thresholds; technical labels left out.
+const PAIR = ['efficientnet', 'wcr'];
+function aiSummary(record) {
+  const entries = Object.entries(record.ai || {});
+  if (!entries.length) return h('p', { class: 'muted' }, 'Анализа ИИ для этой ЭКГ нет.');
+  const tops = Object.fromEntries(entries.map(([key, entry]) => {
+    const { t, above } = aiAbove(entry);
+    return [key, { entry, t, list: above.filter(([l]) => LABEL_GROUP_OF[l] !== 'технические') }];
+  }));
+  // SL and SSL share training data: say whether a label is in both or only one.
+  const pair = PAIR.every(k => tops[k]?.t);
+  const inBoth = l => PAIR.every(k => tops[k].list.some(([x]) => x === l));
+  const top3 = k => tops[k].list.slice(0, 3).map(([l]) => l).sort().join('|');
+  const line = (label, text) => h('li', {}, labelShort(label), h('span', { class: 'small' }, ' — ' + text));
+  const more = list => list.length > 3 ? h('li', { class: 'small' }, `и ещё ${list.length - 3}`) : null;
+  const block = (title, body) => h('div', { class: 'ai-net' }, h('b', {}, title), body);
+  const blocks = [];
+  if (pair && top3('efficientnet') === top3('wcr')) {
+    const [sl, ssl] = PAIR.map(k => tops[k]);
+    blocks.push(block('DeepECG SL и SSL', sl.list.length ? h('ul', {}, sl.list.slice(0, 3).map(([l, v]) => {
+      const w = ssl.entry.scores[l], same = sl.t[l] === ssl.t[l];
+      return line(l, `SL ${dec(v)} · SSL ${dec(w)} (порог ${same ? dec(sl.t[l]) : dec(sl.t[l]) + ' и ' + dec(ssl.t[l])}), в обеих`);
+    }), more(sl.list)) : h('span', { class: 'small' }, 'ни одна метка не выше порога')));
+  }
+  for (const [key, { entry, t, list }] of Object.entries(tops)) {
+    if (blocks.length && PAIR.includes(key)) continue;
+    blocks.push(block(entry.model || key, [entry.synthetic ? h('span', { class: 'pill warn' }, 'тест') : null,
+      !t ? h('p', { class: 'small' }, 'Порогов нет — все оценки на странице ЭКГ.')
+        : list.length ? h('ul', {}, list.slice(0, 3).map(([l, v]) => line(l, `оценка ${dec(v)} (порог ${dec(t[l])})${pair && PAIR.includes(key) ? (inBoth(l) ? ', в обеих SL/SSL' : ', только эта нейросеть') : ''}`)), more(list))
+          : h('span', { class: 'small' }, 'ни одна метка не выше порога')]));
+  }
+  return h('div', {}, h('p', { class: 'small' }, 'Исследовательские нейросети. Оценка 0–1 — не вероятность и не диагноз.'), h('div', { class: 'ai-sum' }, blocks));
+}
+
+// The newest ECG with its key values and AI result: the first thing a doctor looks for.
 function latestCard(patient, records) {
-  const r = records[0];
+  const r = records[0], hasAi = Object.keys(r.ai || {}).length > 0;
   const keys = ['heart_rate_bpm', 'PR_ms', 'QRS_ms', 'QT_ms', 'QTcF_ms', 'QRS_axis'];
-  let outside = 0;
+  const outside = outsideCount(r, patient.sex);
   const vals = keys.filter(k => Number.isFinite(r.measurements?.[k])).map(k => {
     const m = MEASURE_LABELS[k], st = rangeStatus(r.measurements[k], m, patient.sex), off = st && st !== 'normal';
-    if (off) outside++;
     return h('div', { class: 'val' + (off ? ' bad' : '') }, h('small', {}, m.label), h('b', {}, val(r.measurements[k], m.unit === '°' ? '°' : '')), m.unit === '°' ? null : h('span', { class: 'small' }, ' ' + m.unit));
   });
+  // Regularity from the RR variation only; the program does not classify the rhythm.
+  const rr = r.measurements?.RR_cv_pct;
+  if (Number.isFinite(rr)) {
+    const irregular = rangeStatus(rr, MEASURE_LABELS.RR_cv_pct, patient.sex) === 'high';
+    vals.unshift(h('div', { class: 'val text' + (irregular ? ' bad' : ''), title: `Вариация RR ${val(rr, '%')}. Ритм программой не классифицируется.` },
+      h('small', {}, 'RR'), h('b', {}, irregular ? 'нерегулярные' : 'регулярные')));
+  }
   return card(h('div', { class: 'card-head' }, h('div', {}, h('h2', {}, 'Последняя ЭКГ'), h('p', { class: 'muted' }, fmtDate(r.recordedAt, true))),
-    vals.length ? h('span', { class: 'pill ' + (outside ? 'bad' : 'ok') }, outside ? `вне нормы: ${outside}` : 'в пределах нормы') : null),
+    vals.length ? h('span', { class: 'pill ' + (outside ? 'bad' : 'ok') }, outside ? `вне нормы: ${outside}` : 'показатели в норме') : null),
   vals.length ? h('div', { class: 'vals' }, vals) : h('p', { class: 'muted' }, 'Показателей нет.'),
-  h('div', { class: 'actions' }, btn('Открыть ЭКГ', () => go(`#/record/${patient.id}/${r.id}`), 'primary', 'ecg'),
+  h('h3', {}, 'Анализ ИИ'), aiSummary(r),
+  h('div', { class: 'actions' },
+    hasAi ? btn('Открыть анализ ИИ', () => go(`#/record/${patient.id}/${r.id}/ai`), 'primary', 'next') : null,
+    btn('Открыть ЭКГ', () => go(`#/record/${patient.id}/${r.id}`), hasAi ? '' : 'primary', 'ecg'),
     printButton(`ЭКГ ${fullName(patient)} ${fmtDate(r.recordedAt)}`, ctx => recordReportFor(patient, records, r, ctx))));
 }
 
+// The last three ECGs side by side; arrows mark a moderate or marked change from the ECG before.
+function lastThreeCard(patient, records) {
+  if (records.length < 2) return null;
+  const recent = records.slice(0, 3).reverse(), last = recent.length - 1;
+  const steps = recent.slice(1).map((r, i) => compareRecords(recent[i], r, { sex: patient.sex }));
+  const keys = ['heart_rate_bpm', 'PR_ms', 'QRS_ms', 'QT_ms', 'QTcF_ms', 'QRS_axis', 'sokolow_mV'];
+  const rows = keys.filter(k => recent.some(r => Number.isFinite(r.measurements?.[k]))).map(k => {
+    const m = MEASURE_LABELS[k];
+    return h('tr', {}, h('td', {}, m.label + (m.unit && m.unit !== '°' ? ', ' + m.unit : '')), recent.map((r, i) => {
+      const v = r.measurements?.[k], st = rangeStatus(v, m, patient.sex);
+      const ch = i ? steps[i - 1].measurements.find(x => x.key === k) : null;
+      const marked = ch && (ch.level === 'minor' || ch.level === 'major') && ch.delta;
+      const tip = marked ? `${LEVEL_TEXT[ch.level]}: ${ch.delta > 0 ? '+' : ''}${val(ch.delta, m.unit)}` : null;
+      return h('td', { class: 'num' + (st && st !== 'normal' ? ' st-' + st : '') + (i === last ? ' col-latest' : '') }, val(v, m.unit === '°' ? '°' : ''),
+        marked ? h('span', { class: 'arrow ' + ch.level, title: tip, 'aria-label': tip }, ch.delta > 0 ? '↑' : '↓') : null);
+    }));
+  });
+  return card(h('h2', {}, `Последние ${recent.length} ЭКГ`),
+    h('div', { class: 'scroll' }, h('table', { class: 'last3' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Показатель'), recent.map((r, i) => h('th', { class: 'num' + (i === last ? ' col-latest' : '') }, shortDate(r.recordedAt), i === last ? h('div', { class: 'small' }, 'последняя') : null)))),
+      h('tbody', {}, rows))),
+    h('p', { class: 'small gap' }, '↑↓ — рост или снижение по сравнению с предыдущей ЭКГ: жёлтая стрелка — умеренное, красная — выраженное различие (по порогам программы, не клиническая оценка). Красное число — вне нормы.'));
+}
+
+// All ECGs of the patient; ticking two to compare is a rare action, so it is hidden behind a button.
 function recordsTable(patient, records) {
   if (!records.length) return null;
   const chosen = new Set();
   const label = h('span', {}, 'Отметьте 2 ЭКГ');
-  const compareBtn = h('button', { type: 'button', class: 'small', disabled: true, onclick: () => {
+  const compareBtn = h('button', { type: 'button', class: 'small hidden', disabled: true, onclick: () => {
     // Older first, whatever order they were ticked in.
     const [a, b] = records.filter(r => chosen.has(r.id)).reverse().map(r => r.id);
     go(`#/compare/${patient.id}/${a}/${b}`);
   } }, icon('compare'), label);
-  const cols = ['heart_rate_bpm', 'PR_ms', 'QRS_ms', 'QT_ms', 'QTcF_ms', 'QRS_axis'];
+  const table = h('table', {});
+  const pickBtn = btn('Сравнить две ЭКГ', () => { table.classList.add('picking'); pickBtn.classList.add('hidden'); compareBtn.classList.remove('hidden'); }, 'ghost small', 'compare');
   const rows = records.map(r => {
     const box = h('input', { type: 'checkbox', 'aria-label': 'Выбрать для сравнения: ' + fmtDate(r.recordedAt, true), onchange: e => {
       e.target.checked ? chosen.add(r.id) : chosen.delete(r.id);
@@ -462,20 +547,18 @@ function recordsTable(patient, records) {
       compareBtn.className = chosen.size === 2 ? 'small primary' : 'small';
       label.textContent = chosen.size === 2 ? 'Сравнить выбранные' : chosen.size > 2 ? 'Отметьте только 2' : 'Отметьте 2 ЭКГ';
     } });
+    const outside = outsideCount(r, patient.sex);
+    const shown = RULES.measurements.some(m => Number.isFinite(r.measurements?.[m.key]));
     return h('tr', { class: 'link', onclick: e => { if (!e.target.closest('td.pick')) go(`#/record/${patient.id}/${r.id}`); } },
       h('td', { class: 'pick' }, h('label', {}, box)),
       h('td', {}, h('a', { href: `#/record/${patient.id}/${r.id}` }, fmtDate(r.recordedAt, true)), r.isBaseline ? [' ', h('span', { class: 'pill neutral' }, 'исходная')] : null),
-      cols.map(k => {
-        const v = r.measurements?.[k], st = rangeStatus(v, MEASURE_LABELS[k], patient.sex);
-        return h('td', { class: 'num' + (st && st !== 'normal' ? ' st-' + st : '') }, val(v));
-      }),
-      h('td', { class: 'muted' }, Object.keys(r.ai || {}).length ? 'есть' : '—'));
+      h('td', {}, shown ? h('span', { class: 'pill ' + (outside ? 'bad' : 'ok') }, outside ? `вне нормы: ${outside}` : 'в норме') : '—'),
+      h('td', { class: 'muted' }, Object.keys(r.ai || {}).length ? 'есть' : '—'),
+      h('td', { class: 'chev' }, icon('next')));
   });
-  const unit = k => MEASURE_LABELS[k].unit && MEASURE_LABELS[k].unit !== '°' ? ', ' + MEASURE_LABELS[k].unit : '';
-  return card(h('div', { class: 'card-head' }, h('h2', {}, `История ЭКГ (${records.length})`), records.length > 1 ? compareBtn : null),
-    h('div', { class: 'scroll' }, h('table', {},
-      h('thead', {}, h('tr', {}, h('th', {}), h('th', {}, 'Дата'), cols.map(k => h('th', { class: 'num' }, MEASURE_LABELS[k].label + unit(k))), h('th', {}, 'ИИ'))),
-      h('tbody', {}, rows))));
+  table.append(h('thead', {}, h('tr', {}, h('th', { class: 'pick' }), h('th', {}, 'Дата'), h('th', {}, 'Показатели'), h('th', {}, 'Анализ ИИ'), h('th', {}))), h('tbody', {}, rows));
+  return card(h('div', { class: 'card-head' }, h('h2', {}, `Все ЭКГ (${records.length})`), records.length > 1 ? [pickBtn, compareBtn] : null),
+    h('div', { class: 'scroll' }, table));
 }
 
 function addRecordCard(patient, records) {
@@ -595,6 +678,7 @@ async function viewRecord(pid, rid) {
 
 function aiCard(patient, record) {
   const box = card();
+  box.id = 'ai';
   const msg = h('p', { role: 'alert', class: 'error' });
   const attach = async (key, entry) => {
     record.ai = { ...(record.ai || {}), [key]: entry };
@@ -606,19 +690,14 @@ function aiCard(patient, record) {
   box.append(head);
   if (!entries.length) box.append(h('p', { class: 'muted' }, 'Для этой ЭКГ анализа ИИ пока нет.'));
   for (const [key, entry] of entries) {
-    const t = entry.thresholds || null;
-    // With the authors' operating points: show labels above them, ordered by margin (logit).
-    const ranked = t
-      ? Object.entries(entry.scores).filter(([l]) => t[l]).map(([l, v]) => [l, v, logitMargin(v, t[l])]).sort((a, b) => b[2] - a[2])
-      : Object.entries(entry.scores).sort((a, b) => b[1] - a[1]).map(([l, v]) => [l, v, null]);
-    const above = t ? ranked.filter(r => r[2] > 0) : ranked.slice(0, 10);
+    const { t, ranked, above } = aiAbove(entry);
     box.append(h('div', { 'data-model': key }, h('h3', {}, entry.model || key),
       entry.synthetic ? notice('Это технический тест на искусственном сигнале, а не оценка этой ЭКГ.') : null,
       t ? h('p', { class: 'muted' }, `Выше рабочего порога авторов: ${above.length} из ${ranked.length}. Порог подобран на данных авторов, не на ECG301.`)
-        : notice('Для этой нейросети нет опубликованных порогов: числа 0–1 нельзя читать как «есть/нет».'),
-      above.length ? h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Заключение'), h('th', { class: 'num' }, 'Оценка'), t ? h('th', { class: 'num' }, 'Порог') : null)),
+        : notice('Порогов у этой нейросети нет. Ниже — первые 10 по величине оценки; это не находки.'),
+      above.length ? h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Метка нейросети'), h('th', { class: 'num' }, 'Оценка'), t ? h('th', { class: 'num' }, 'Порог') : null)),
         h('tbody', {}, above.slice(0, 15).map(([label, v]) => h('tr', {}, h('td', {}, labelRu(label)), h('td', { class: 'num' }, v.toFixed(3)),
-          t ? h('td', { class: 'num' }, String(t[label])) : null))))) : h('p', {}, 'Ни одно заключение не превышает порог.'),
+          t ? h('td', { class: 'num' }, String(t[label])) : null))))) : h('p', {}, 'Ни одна метка не выше порога.'),
       h('details', {}, h('summary', {}, `Все оценки (${Object.keys(entry.scores).length})`),
         h('div', { class: 'scroll', style: 'max-height:360px' }, h('table', {}, h('tbody', {},
           Object.entries(entry.scores).sort((a, b) => b[1] - a[1]).map(([label, v]) => h('tr', {}, h('td', {}, labelRu(label)), h('td', { class: 'num' }, v.toFixed(4)))))))),
@@ -662,10 +741,14 @@ function aiCard(patient, record) {
 // ---------- comparison
 // Warnings that change how the result is read stay visible; the rest fold away.
 const KEY_WARNING = /перепутаны электроды|QRS ≥120/;
+// AI score shifts get their own neutral chip: they are not clinical findings.
+const aiPill = level => h('span', { class: 'pill neutral' }, level === 'major' ? 'сдвиг оценки большой' : 'сдвиг оценки средний');
+const aiChangeText = x => `${dec(x.a)} → ${dec(x.b)}` + (x.crossed ? `, стала ${x.b > x.a ? 'выше' : 'ниже'} порога авторов (${dec(x.threshold)})` : '') +
+  (x.concordant ? ', так же в другой нейросети' : ', только эта нейросеть');
 
 function comparisonView(c, patient, { compact = false } = {}) {
   const ok = !c.counts.major && !c.counts.minor && (c.measurements.length || c.waveform.available);
-  const out = h('div', {},
+  const out = h('div', {}, h('p', { class: 'small', style: 'margin:0 0 2px' }, 'Показатели и форма комплексов'),
     h('p', { class: 'headline' + (ok ? ' ok' : '') }, (ok ? '✓ ' : '') + c.headline),
     h('p', { class: 'muted' }, `${fmtDate(c.older.recordedAt)} → ${fmtDate(c.newer.recordedAt)}, ${fmtPeriod(c.days)}`));
   if (c.highlights.length) out.append(h('ul', { class: 'highlights' }, c.highlights.map(m => h('li', {}, pill(m.level), h('span', {}, m.text)))));
@@ -679,9 +762,17 @@ function comparisonView(c, patient, { compact = false } = {}) {
       h('td', { class: 'num' + (m.statusB && m.statusB !== 'normal' ? ' st-' + m.statusB : '') }, val(m.b, m.unit)),
       h('td', { class: 'num' }, (m.delta > 0 ? '↑ +' : m.delta < 0 ? '↓ ' : '') + val(m.delta, m.unit)), h('td', {}, pill(m.level)))))));
   const changed = c.measurements.filter(m => m.level !== 'none');
-  if (changed.length) out.append(table(changed));
-  else if (c.measurements.length) out.append(h('p', { class: 'muted' }, 'Все показатели в пределах обычной погрешности измерения.'));
+  if (!compact && changed.length) out.append(table(changed));
+  else if (!c.highlights.length && c.measurements.length) out.append(h('p', { class: 'muted' }, 'Все показатели в пределах обычной погрешности измерения.'));
   if (!compact && c.measurements.length > changed.length) out.append(h('details', {}, h('summary', {}, `Все показатели (${c.measurements.length})`), table(c.measurements)));
+  // Profile view: the AI score changes in a few lines (threshold crossings first); they are not part of the result above.
+  if (compact && c.scores.length) out.append(h('h3', {}, 'Оценки ИИ: что изменилось'), h('p', { class: 'small' }, 'В итог сравнения не входят.'), h('div', { class: 'ai-sum' }, c.scores.map(s => {
+    const top = [...s.changes].sort((x, y) => y.crossed - x.crossed).slice(0, 3);
+    return h('div', { class: 'ai-net' }, h('b', {}, s.modelName),
+      !s.sameWeights ? h('span', { class: 'small' }, 'разные версии нейросети — не сравнивается')
+        : top.length ? h('ul', {}, top.map(x => h('li', {}, aiPill(x.level), ' ', labelShort(x.label), h('span', { class: 'small' }, ' — ' + aiChangeText(x)))))
+          : h('span', { class: 'small' }, 'существенных изменений нет'));
+  })));
 
   if (!compact) {
     const w = c.waveform;
@@ -706,15 +797,13 @@ function comparisonView(c, patient, { compact = false } = {}) {
       if (!s.changes.length) { section.append(h('p', { class: 'muted' }, 'Существенных изменений оценок нет.')); continue; }
       if (!s.sameWeights) section.append(notice('Версии нейросети на двух ЭКГ различаются — оценки сравнивать нельзя.'));
       section.append(h('div', { class: 'scroll' }, h('table', {}, h('tbody', {}, s.changes.map(x => h('tr', {}, h('td', {}, labelRu(x.label)),
-        h('td', { class: 'num' }, `${x.a.toFixed(2)} → ${x.b.toFixed(2)}`),
-        h('td', {}, [x.crossed ? (x.b > x.a ? `стала выше порога ${x.threshold}` : `стала ниже порога ${x.threshold}`) : null, x.concordant ? 'так же изменилась в другой нейросети' : 'только эта нейросеть'].filter(Boolean).join('; ')),
-        h('td', {}, pill(x.level))))))));
+        h('td', {}, aiChangeText(x)), h('td', {}, aiPill(x.level))))))));
     }
     const picker = modelPicker(out, c.scores.map(s => s.model));
     if (picker) aiHead.after(picker);
     if (c.concordant.length) out.append(h('p', {}, h('b', {}, 'Согласованные изменения (SL и SSL): '), c.concordant.map(g => `${labelRu(g.label)} ${g.direction === 'up' ? '↑' : '↓'}`).join(', ')),
       h('p', { class: 'small' }, 'SL и SSL обучены на общих данных, поэтому их согласие — не полностью независимое подтверждение.'));
-    if (c.scores.length) out.append(notice('Небольшие колебания оценок ИИ нормальны. В итог попадают только изменения, где согласны две нейросети.', 'info'));
+    if (c.scores.length) out.append(notice('Небольшие колебания оценок ИИ нормальны. Оценки ИИ в итог сравнения не входят; согласие SL и SSL отмечено отдельно.', 'info'));
     out.append(h('details', {}, h('summary', {}, 'Правила сравнения и источники'), h('div', { class: 'scroll' }, h('table', {}, h('tbody', {},
       RULES.measurements.map(r => h('tr', {}, h('td', {}, r.label), h('td', { class: 'muted' }, `шум <${r.noise}, умеренное ≥${r.minor}, выраженное ≥${r.major} ${r.unit}`),
         h('td', { class: 'muted' }, (r.basis === 'source' ? 'по источнику' : 'практический выбор') + (r.ref ? ': ' + r.ref : ''))))))),
@@ -737,31 +826,13 @@ async function viewCompare(pid, a, b) {
       notice(DISCLAIMER, 'info'));
     return;
   }
-  // Pick a patient: opens the newest ECG against the one before it.
-  const patients = await state.store.listPatients();
-  const info = new Map();
-  for (const p of patients) info.set(p.id, sortByDate(await state.store.listRecords(p.id)));
-  const ordered = [...patients].sort((x, y) => (info.get(y.id)[0]?.recordedAt || '').localeCompare(info.get(x.id)[0]?.recordedAt || '') || fullName(x).localeCompare(fullName(y), 'ru'));
-  const search = h('input', { type: 'search', placeholder: 'Фамилия пациента', 'aria-label': 'Найти пациента', autocomplete: 'off', spellcheck: 'false' });
-  const list = h('div', { class: 'plist' });
-  let shown = [];
-  const target = p => { const r = info.get(p.id); return r.length > 1 ? `#/compare/${p.id}/${r[1].id}/${r[0].id}` : null; };
-  const draw = () => {
-    const q = search.value.trim().toLowerCase();
-    shown = ordered.filter(p => fullName(p).toLowerCase().includes(q));
-    fill(list, shown.length ? shown.map(p => {
-      const r = info.get(p.id), href = target(p);
-      return h('a', { class: 'prow' + (href ? '' : ' off'), href: href || '#/patient/' + p.id },
-        h('span', { class: 'avatar', 'aria-hidden': 'true' }, initials(p)),
-        h('div', {}, h('div', { class: 'name' }, fullName(p)), h('div', { class: 'meta' }, href ? `${shortDate(r[1].recordedAt)} → ${shortDate(r[0].recordedAt)}` : `ЭКГ: ${r.length} — для сравнения нужно две`)),
-        h('div', { class: 'last' }, href ? h('b', {}, 'Сравнить') : null), h('span', { class: 'chev' }, icon('next')));
-    }) : h('div', { class: 'empty' }, h('p', {}, patients.length ? 'Никого не найдено.' : 'Пациентов пока нет.')));
-  };
-  search.addEventListener('input', draw);
-  search.addEventListener('keydown', e => { const t = shown[0] && target(shown[0]); if (e.key === 'Enter' && t) go(t); });
-  draw();
+  // Comparing is done from the patient profile; old links land on the patient list.
+  go('#/patients');
+}
 
-  const fa = h('input', { type: 'file', 'aria-label': 'Первая ЭКГ' }), fb = h('input', { type: 'file', 'aria-label': 'Вторая ЭКГ' });
+// Two files compared without saving them (Data page).
+function fileCompareCard() {
+  const fa = h('input', { type: 'file', 'aria-label': 'Ранняя ЭКГ' }), fb = h('input', { type: 'file', 'aria-label': 'Поздняя ЭКГ' });
   const sex = h('select', {}, h('option', { value: '' }, 'не указан'), h('option', { value: 'M' }, 'мужской'), h('option', { value: 'F' }, 'женский'));
   const out = h('div'), msg = h('p', { role: 'alert', class: 'error' });
   const loadAny = async file => {
@@ -772,23 +843,20 @@ async function viewCompare(pid, a, b) {
     }
     return recordFromECG301(buffer, file.name);
   };
-  view.replaceChildren(pageHead('Сравнение ЭКГ', 'Выберите пациента — откроется его последняя ЭКГ рядом с предыдущей. Другие пары можно отметить в истории ЭКГ пациента.'),
-    h('div', { class: 'search' }, icon('search'), search), list,
-    h('details', { class: 'fold gap-lg' }, h('summary', {}, 'Сравнить два файла без сохранения'), h('div', { class: 'fold-body' },
-      h('p', { class: 'muted' }, 'Файлы прибора ECG301 или файлы ЭКГ из CardioAI. В программу ничего не сохраняется.'),
-      h('div', { class: 'form-grid' }, dropZone(fa, { compact: true, title: ['Ранняя ЭКГ: ', h('b', {}, 'выберите файл')] }), dropZone(fb, { compact: true, title: ['Поздняя ЭКГ: ', h('b', {}, 'выберите файл')] })),
-      h('label', { class: 'narrow' }, 'Пол (для норм QTc)', sex), msg,
-      btn('Сравнить файлы', async () => {
-        msg.textContent = '';
-        try {
-          if (!fa.files[0] || !fb.files[0]) throw Error('Выберите оба файла');
-          const [ra, rb] = [await loadAny(fa.files[0]), await loadAny(fb.files[0])];
-          if (ra.sha256 && ra.sha256 === rb.sha256) throw Error('Выбран один и тот же файл дважды');
-          fill(out, card(comparisonView(compareRecords(ra, rb, { sex: sex.value || null }), { sex: sex.value || null })));
-        } catch (err) { msg.textContent = err.message; }
-      }, 'primary', 'compare'))),
-    out);
-  if (matchMedia('(pointer:fine)').matches) search.focus();
+  return h('details', { class: 'fold' }, h('summary', {}, 'Сравнить два файла без сохранения'), h('div', { class: 'fold-body' },
+    h('p', { class: 'muted' }, 'Для разовой проверки: файлы прибора ECG301 или файлы ЭКГ из CardioAI. В программу ничего не сохраняется. ЭКГ пациентов сравниваются в их карточках.'),
+    h('div', { class: 'form-grid' }, dropZone(fa, { compact: true, title: ['Ранняя ЭКГ: ', h('b', {}, 'выберите файл')] }), dropZone(fb, { compact: true, title: ['Поздняя ЭКГ: ', h('b', {}, 'выберите файл')] })),
+    h('label', { class: 'narrow' }, 'Пол (для норм QTc)', sex), msg,
+    btn('Сравнить файлы', async () => {
+      msg.textContent = '';
+      try {
+        if (!fa.files[0] || !fb.files[0]) throw Error('Выберите оба файла');
+        const [ra, rb] = [await loadAny(fa.files[0]), await loadAny(fb.files[0])];
+        if (ra.sha256 && ra.sha256 === rb.sha256) throw Error('Выбран один и тот же файл дважды');
+        fill(out, h('div', { class: 'gap-lg' }, comparisonView(compareRecords(ra, rb, { sex: sex.value || null }), { sex: sex.value || null })));
+      } catch (err) { msg.textContent = err.message; }
+    }, 'primary', 'compare'),
+    out));
 }
 
 function stripTemplates(c) {
@@ -951,6 +1019,7 @@ async function viewSettings() {
       }, 'primary', 'save')),
       dropZone(file, { compact: true, title: ['Восстановить из копии: перетащите файл или ', h('b', {}, 'выберите')] }), msg,
       state.store.kind === 'server' && state.status?.data_dir ? h('details', {}, h('summary', {}, 'Папка с данными'), h('p', { class: 'muted' }, state.status.data_dir)) : null),
+    fileCompareCard(),
     ...(state.store.kind === 'server' ? [exchangeCard()] : []),
     card(h('h2', {}, 'О программе'), h('p', {}, 'CardioAI — локальная исследовательская программа для просмотра ЭКГ, ведения истории и сравнения записей.'),
       h('p', { class: 'muted' }, 'Правила сравнения: версия ' + RULES.version + '. Пороги частично взяты из публикаций, частично — практические (см. docs/research).'), notice(DISCLAIMER, 'info')));
@@ -960,7 +1029,7 @@ async function viewSettings() {
 async function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
   const page = parts[0] || 'patients';
-  for (const a of document.querySelectorAll('nav a')) a.classList.toggle('active', a.dataset.nav === (page === 'patient' || page === 'record' ? 'patients' : page));
+  for (const a of document.querySelectorAll('nav a')) a.classList.toggle('active', a.dataset.nav === (['patient', 'record', 'compare'].includes(page) ? 'patients' : page));
   try {
     if (page === 'patient') await viewPatient(parts[1]);
     else if (page === 'record') await viewRecord(parts[1], parts[2]);
@@ -976,7 +1045,9 @@ async function route() {
       h('div', { class: 'row' }, btn('К списку пациентов', () => go('#/patients'), 'primary', 'back'), btn('Обновить', () => location.reload())),
       ours ? null : h('details', {}, h('summary', {}, 'Технические подробности'), h('p', { class: 'small' }, String(err.stack || err.message))));
   }
-  window.scrollTo(0, 0);
+  // "#/record/<pid>/<rid>/ai" opens the ECG at its AI analysis.
+  const target = page === 'record' && parts[3] === 'ai' && document.getElementById('ai');
+  if (target) target.scrollIntoView(); else window.scrollTo(0, 0);
 }
 
 async function start() {

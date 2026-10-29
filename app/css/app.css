@@ -47,7 +47,7 @@ h3{font-size:16px;margin:22px 0 10px}
 .page-head .sub{color:var(--text-2);font-size:15px;margin:6px 0 0}
 .back{display:inline-flex;align-items:center;gap:6px;min-height:40px;margin-top:14px;padding:0 12px 0 6px;border-radius:var(--r-md);color:var(--text-2);font-weight:600;font-size:15px;text-decoration:none}
 .back:hover{background:var(--surface-2);color:var(--text-1)}
-section.card{background:var(--surface-1);border:1px solid var(--border);border-radius:var(--r-lg);padding:24px;margin:0 0 20px;box-shadow:var(--shadow)}
+section.card{background:var(--surface-1);border:1px solid var(--border);border-radius:var(--r-lg);padding:24px;margin:0 0 20px;box-shadow:var(--shadow);scroll-margin-top:80px}
 .card-head{display:flex;align-items:center;justify-content:space-between;gap:10px 16px;flex-wrap:wrap;margin-bottom:14px}
 .card-head h2{margin:0}
 .muted{color:var(--text-2);font-size:15px}
@@ -144,6 +144,7 @@ a.pill{text-decoration:none}
 .val{min-width:104px;padding:10px 14px;border-radius:var(--r-md);background:var(--surface-2)}
 .val small{display:block;font-size:13px;color:var(--text-2)}
 .val b{font-size:20px;font-variant-numeric:tabular-nums}
+.val.text b{font-size:16px;line-height:30px}
 .val.bad{background:var(--danger-soft)}.val.bad b{color:var(--danger)}
 
 /* Notices */
@@ -159,6 +160,18 @@ th{background:var(--surface-2);font-size:13px;font-weight:600;color:var(--text-2
 td{padding:10px 14px;border-top:1px solid var(--border);vertical-align:middle}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 td.num{font-weight:600}
+.col-latest{background:var(--accent-soft)}
+table:not(.picking) .pick{display:none}
+td.chev{width:36px;color:var(--text-3)}
+.arrow{display:inline-block;width:14px;margin-left:4px;font-weight:800;text-align:center}
+.arrow.minor{color:var(--warn)}.arrow.major{color:var(--danger)}
+
+/* AI summary in the profile */
+.ai-sum{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.ai-net{padding:12px 14px;border-radius:var(--r-md);background:var(--surface-2);font-size:15px}
+.ai-net>b{display:inline-block;margin:0 8px 4px 0}
+.ai-net ul{list-style:none;margin:4px 0 0;padding:0}
+.ai-net li{padding:3px 0}
 td.norm{color:var(--text-3);font-size:14px;white-space:nowrap}
 tr.abn td{background:var(--danger-soft)}
 .st-high,.st-low{color:var(--danger)!important;font-weight:700}
