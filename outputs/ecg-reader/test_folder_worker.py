@@ -23,13 +23,14 @@ import { writeFileSync } from 'node:fs';
 import { syntheticECG301 } from './tests/js/fixtures.mjs';
 import { parseECG301 } from './app/js/ecg301.js';
 import { deriveMeasurements } from './app/js/measure.js';
-const buf = syntheticECG301({ id: '20261023170734', axes: [-30, 120, 200], sv1: -1.234567, rv5: 2.0456 });
+const buf = syntheticECG301({ id: '20261023170734', axes: [-30, 120, 200], sv1: -1.234567, rv5: 2.0456,
+  patient: ['', 'ivanov  ', 'petr'] });
 const view = new DataView(buf);
 [812, 790, 845, 801, 1210, 640, 799, 833, 780, 905, 760].forEach((v, i) => view.setUint16(24089 + 2 * i, v, true));
 writeFileSync(process.argv[1], new Uint8Array(buf));
 const p = parseECG301(buf);
 console.log(JSON.stringify({ recordedAt: p.recordedAt, deviceRecordId: p.recordId, device: p.device,
-  measurements: deriveMeasurements(p.device), leads: p.blocks.B, checks: p.checks }));
+  measurements: deriveMeasurements(p.device), leads: p.blocks.B, checks: p.checks, devicePatient: p.patient }));
 """
 
 
@@ -52,7 +53,7 @@ class FolderWorkerTest(unittest.TestCase):
 
     def test_record_matches_the_app(self):
         record = record_from_ecg301(self.ecg.read_bytes(), self.ecg.name)
-        for key in ('recordedAt', 'deviceRecordId', 'device', 'measurements'):
+        for key in ('recordedAt', 'deviceRecordId', 'device', 'measurements', 'devicePatient'):
             self.assertEqual(record[key], self.js[key], key)
         self.assertEqual(record['signal']['leads'], self.js['leads'])
         for block in ('A', 'B'):
@@ -91,8 +92,10 @@ class FolderWorkerTest(unittest.TestCase):
         self.assertEqual(len(store.list_records(patient['id'])), 1)
         self.assertEqual(worker.status()['recent'][-1]['status'], 'duplicate')
 
-        # Not in a patient folder, or not an ECG file: moved to errors with the reason.
-        self.drop(worker, 'loose')
+        # No name on the device and no patient folder, or not an ECG file: moved to errors with the reason.
+        nameless = bytearray(self.ecg.read_bytes())
+        nameless[22:61] = bytes(39)  # no name typed on the device
+        (worker.root / INBOX / 'loose').write_bytes(bytes(nameless))
         (worker.root / INBOX / 'Петров Пётр').mkdir()
         (worker.root / INBOX / 'Петров Пётр/photo.jpg').write_bytes(b'not an ecg')
         worker.scan(), worker.scan()
@@ -129,6 +132,36 @@ class FolderWorkerTest(unittest.TestCase):
         self.assertIsNone(record['device']['RV5_mV'])
         self.assertNotIn('RV5_mV', record['measurements'])
         self.assertNotIn('sokolow_mV', record['measurements'])
+
+    def test_name_key_matches_the_app(self):
+        names = ['Пётр  Иванов', 'Smirnova Anna', 'Юлия Хабибуллина', 'Yuliya Khabibulina', 'Щукин Алексей',
+                 'Shchukin Aleksei', 'Xenia O\'Neil-Smith', unicodedata.normalize('NFD', 'Сергей Йогурт')]
+        js = json.loads(subprocess.run(
+            ['node', '--input-type=module', '-e', "import { nameKey } from './app/js/autofile.js';"
+             "console.log(JSON.stringify(JSON.parse(process.argv[1]).map(nameKey)));", json.dumps(names)],
+            cwd=ROOT, check=True, capture_output=True, text=True).stdout)
+        self.assertEqual([folder_worker.name_key(n) for n in names], js)
+
+    def test_inbox_root_uses_the_name_typed_on_the_device(self):
+        store = PatientStore(self.dir / 'store')
+        store.save_patient({'id': 'a' * 32, 'surname': 'Иванов', 'name': 'Пётр'})
+        worker = FolderWorker(store, self.dir / 'exchange', partial_wait=0)
+        worker.start()
+        worker.stop()
+        # The device says "ivanov petr": the Cyrillic card is found, and the device name is remembered.
+        self.assertEqual(self.drop(worker, 'ecg-from-device'), 1)
+        self.assertEqual(len(store.list_records('a' * 32)), 1)
+        self.assertEqual(store.list_patients()[0]['deviceLabels'], [folder_worker.name_key('ivanov petr')])
+        self.assertEqual(worker.status()['recent'][-1]['patient'], 'Иванов Пётр')
+        # A name nobody has yet: a new card from the device fields.
+        blob = bytearray(self.ecg.read_bytes())
+        blob[34:61] = bytes(27)
+        blob[34:41], blob[47:52], blob[6:20] = b'sidorov', b'oleg ', b'20261024090000'
+        (worker.root / INBOX / 'other').write_bytes(bytes(blob))
+        worker.scan(), worker.scan()
+        created = [p for p in store.list_patients() if p['id'] != 'a' * 32]
+        self.assertEqual([(p['surname'], p['name']) for p in created], [('Sidorov', 'Oleg')])
+        self.assertIn('Проверьте ФИО', created[0]['notes'])
 
     def test_partial_download_is_ignored(self):
         worker = FolderWorker(PatientStore(self.dir / 'store'), self.dir / 'exchange', partial_wait=0)

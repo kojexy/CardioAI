@@ -7,6 +7,7 @@ import { openStore, newId, exportAll, importAll } from './store.js';
 import { trendChart, beatOverlay, stripChart } from './charts.js';
 import { toMillivolts } from './signal.js';
 import { saveFile, readFile } from './files.js';
+import { fileDeviceRecord, linkDeviceName } from './autofile.js';
 
 const state = { store: null, status: null, labelsRu: {}, thresholds: {} };
 const view = document.getElementById('view');
@@ -62,7 +63,7 @@ function sortByDate(records) { return [...records].sort((a, b) => (b.recordedAt 
 async function recordFromECG301(buffer, fileName) {
   const parsed = parseECG301(buffer);
   return {
-    id: newId(), source: 'ecg301', fileName, sha256: await sha256Hex(buffer), deviceRecordId: parsed.recordId,
+    id: newId(), source: 'ecg301', fileName, sha256: await sha256Hex(buffer), deviceRecordId: parsed.recordId, devicePatient: parsed.patient,
     recordedAt: parsed.recordedAt, device: parsed.device, measurements: deriveMeasurements(parsed.device),
     signal: { block: 'B', fs: ASSUMED.fsB, leads: parsed.blocks.B,
       calibration: { microvoltsPerCount: ASSUMED.microvoltsPerCount, zeroCounts: ASSUMED.zeroCounts, verified: false } },
@@ -105,8 +106,34 @@ async function viewPatients() {
   };
   search.oninput = draw;
   draw();
-  view.replaceChildren(h('h1', {}, 'Пациенты'), card(search, h('div', { style: 'margin-top:12px' }, list)),
+  view.replaceChildren(h('h1', {}, 'Пациенты'), card(search, h('div', { style: 'margin-top:12px' }, list)), importCard(),
     card(h('h2', {}, 'Новый пациент'), patientForm({}, async p => { await state.store.savePatient(p); location.hash = '#/patient/' + p.id; })));
+}
+
+// Several device files at once: each goes to its patient by the name typed on the cardiograph.
+function importCard() {
+  const files = h('input', { type: 'file', multiple: true, 'aria-label': 'Файлы ЭКГ с прибора' });
+  const out = h('div');
+  const STATUS = { ok: 'добавлена', duplicate: 'уже была', error: 'не добавлена' };
+  const run = h('button', { class: 'primary', onclick: async () => {
+    if (!files.files.length) { out.replaceChildren(h('p', { class: 'error' }, 'Выберите файлы')); return; }
+    run.disabled = true;
+    const rows = [];
+    for (const file of files.files) {
+      let res;
+      try { res = await fileDeviceRecord(state.store, await recordFromECG301(await readFile(file), file.name)); }
+      catch (err) { res = { status: 'error', message: err.message }; }
+      rows.push(h('tr', {}, h('td', {}, file.name),
+        h('td', {}, res.patient ? h('a', { href: '#/patient/' + res.patient.id }, fullName(res.patient)) : '—'),
+        h('td', { class: res.status === 'error' ? 'error' : '' }, STATUS[res.status] + (res.created ? ', новый пациент' : '') + (res.message ? ': ' + res.message : ''))));
+    }
+    run.disabled = false;
+    out.replaceChildren(h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Файл'), h('th', {}, 'Пациент'), h('th', {}, 'Итог'))), h('tbody', {}, rows))),
+      h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { onclick: () => route() }, 'Обновить список пациентов')));
+  } }, 'Разложить по пациентам');
+  return card(h('h2', {}, 'Импорт ЭКГ с прибора'),
+    h('p', { class: 'muted' }, 'Выберите один или несколько файлов прибора. Программа прочитает имя, введённое на кардиографе, и добавит ЭКГ нужному пациенту. Если такого пациента нет — создаст карточку; проверьте в ней ФИО, дату рождения и пол.'),
+    h('label', {}, 'Файлы', files), h('div', { class: 'row' }, run), out);
 }
 
 function patientForm(p, onSave) {
@@ -226,6 +253,8 @@ function addRecordCard(patient, records) {
     record.patientId = patient.id;
     if (record.sha256 && records.some(r => r.sha256 === record.sha256)) throw Error('Этот файл уже есть в истории пациента');
     await state.store.saveRecord(record);
+    // Next files with this device name go to this patient automatically.
+    if (record.devicePatient?.label) await linkDeviceName(state.store, patient, record.devicePatient.label);
     route();
   };
   // ECG301 file
@@ -237,7 +266,8 @@ function addRecordCard(patient, records) {
     try {
       pending = await recordFromECG301(await readFile(file.files[0]), file.files[0].name);
       fileDate.value = (pending.recordedAt || '').slice(0, 16);
-      say(`Файл прочитан: запись ${pending.deviceRecordId}. Проверьте дату и нажмите «Добавить».`);
+      const who = pending.devicePatient?.label ? ` Имя в приборе: «${pending.devicePatient.label}».` : '';
+      say(`Файл прочитан: запись ${pending.deviceRecordId}.${who} Проверьте дату и нажмите «Добавить».`);
     } catch (err) { say(err.message, true); }
   };
   const fileForm = h('div', {}, h('p', { class: 'muted' }, 'Исходный файл кардиографа ECG301 (без расширения). Дата берётся из номера записи.'),

@@ -10,9 +10,11 @@ function beat(t, fs, rate, { qrsWidth = 0.025, amp = 1, tAmp = 0.25 } = {}) {
 
 // Returns an ArrayBuffer laid out like the studied ECG301 variant.
 export function syntheticECG301({ id = '20260101120000', rate = 75, hr = 75, pr = 160, qrs = 92, qt = 380, qtc = 410,
-  axes = [50, 45, 40], rv5 = 1.8, sv1 = 0.9, shape = {} } = {}) {
+  axes = [50, 45, 40], rv5 = 1.8, sv1 = 0.9, shape = {}, patient = [] } = {}) {
   const buf = new ArrayBuffer(39381), view = new DataView(buf), bytes = new Uint8Array(buf);
   for (let i = 0; i < 14; i++) bytes[6 + i] = id.charCodeAt(i);
+  // Text typed on the device: [field at 22, at 34, at 47], as in app/js/ecg301.js PATIENT_FIELDS.
+  patient.forEach((text, k) => bytes.set(new TextEncoder().encode(text), [22, 34, 47][k]));
   const gain = 1.16 / 1000; // mV per count
   const write = (off, n, fs) => {
     // Simple lead model: I and II from the beat, the rest derived so that III = II - I holds.

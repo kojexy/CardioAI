@@ -38,6 +38,25 @@ export async function sha256Hex(buffer) {
   return Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Text typed on the cardiograph before recording (seen in a real file: two name fields).
+// Field meaning is not confirmed by the manufacturer, so the text is kept as typed.
+export const PATIENT_FIELDS = [[22, 34], [34, 47], [47, 61]];
+
+function decodeField(bytes) {
+  const end = bytes.indexOf(0);
+  const raw = end < 0 ? bytes : bytes.slice(0, end);
+  if (!raw.length) return '';
+  for (const enc of ['utf-8', 'gbk']) {
+    try { return new TextDecoder(enc, { fatal: true }).decode(raw).replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim(); } catch { /* next */ }
+  }
+  return '';
+}
+
+export function devicePatient(bytes) {
+  const fields = PATIENT_FIELDS.map(([a, b]) => decodeField(bytes.slice(a, b)));
+  return { fields, label: fields.filter(Boolean).join(' ') };
+}
+
 export function parseECG301(buffer) {
   if (buffer.byteLength !== ECG301_SIZE)
     throw Error(`Неизвестный вариант файла: ${buffer.byteLength} байт, ожидалось ${ECG301_SIZE}. Файл не изменён.`);
@@ -67,6 +86,7 @@ export function parseECG301(buffer) {
   return {
     recordId: id,
     recordedAt: dateFromRecordId(id),
+    patient: devicePatient(bytes),
     blocks: { A, B },
     device: {
       heart_rate_bpm: hr, PR_ms: pr, QRS_ms: qrs, QT_ms: qt, QTc_ms: qtc, RR_ms: rr,

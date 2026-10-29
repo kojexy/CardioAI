@@ -4,6 +4,8 @@
 Layout of the exchange folder (it may live in a synced folder: Google Drive, Dropbox,
 Yandex Disk, Syncthing…, so files can come from a phone or another computer):
 
+    Входящие/<file>               filed by the name typed on the cardiograph (same rules as
+                                  app/js/autofile.js); a new name creates a patient
     Входящие/Иванов Иван/<file>   ECG301 file for this patient (created if new); namesakes are
                                   told apart by a birth date: «Иванов Иван 1980-05-01»
     Результаты/Иванов Иван/       one "cardioai-record" JSON + short text per ECG;
@@ -44,9 +46,10 @@ MEASURE_RU = [('heart_rate_bpm', 'ЧСС', 'уд/мин'), ('PR_ms', 'PR', 'мс
               ('sokolow_mV', 'Соколов–Лайон', 'мВ'), ('RR_cv_pct', 'Вариабельность RR', '%')]
 README = """Папка обмена CardioAI
 
-1. Положите файл ЭКГ с прибора в папку «Входящие/Фамилия Имя» (папку можно создать).
-   Например: Входящие/Иванов Иван/202610231707340025
-   Если есть тёзки, добавьте дату рождения: «Входящие/Иванов Иван 1980-05-01».
+1. Положите файл ЭКГ с прибора прямо в папку «Входящие». Программа прочитает имя,
+   введённое на кардиографе, и добавит ЭКГ этому пациенту (или создаст новую карточку).
+   Если имя на приборе не введено или есть тёзки — положите файл в папку пациента:
+   Входящие/Иванов Иван/202610231707340025 или Входящие/Иванов Иван 1980-05-01/…
 2. Программа CardioAI на этом компьютере сама добавит ЭКГ в карточку пациента
    (новый пациент будет создан) и сравнит с прошлыми записями.
 3. В папке «Результаты/Фамилия Имя» появится файл .json — его можно добавить
@@ -121,7 +124,48 @@ def record_from_ecg301(blob, file_name):
                 signal=dict(block='B', fs=FS_B, leads=r['block_B'],
                             calibration=dict(microvoltsPerCount=MICROVOLTS_PER_COUNT, zeroCounts=ZERO_COUNTS, verified=False)),
                 checks=dict(limbIdentity=r['checks']['limb_identity_correlation']), ai={},
+                devicePatient=device_patient(blob),
                 createdAt=datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
+
+
+PATIENT_FIELDS = [(22, 34), (34, 47), (47, 61)]  # as app/js/ecg301.js PATIENT_FIELDS
+CYR = dict(zip('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+               ['a', 'b', 'v', 'g', 'd', 'e', 'e', 'zh', 'z', 'i', 'i', 'k', 'l', 'm', 'n', 'o', 'p', 'r', 's', 't',
+                'u', 'f', 'h', 'ts', 'ch', 'sh', 'sh', '', 'i', '', 'e', 'iu', 'ia']))
+
+
+def decode_field(raw):
+    raw = raw.split(b'\0', 1)[0]
+    for encoding in ('utf-8', 'gbk'):
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        return ' '.join(re.sub(r'[\x00-\x1f]', ' ', text).split())
+    return ''
+
+
+def device_patient(blob):
+    """Text typed on the cardiograph (twin of devicePatient in app/js/ecg301.js)."""
+    fields = [decode_field(blob[a:b]) for a, b in PATIENT_FIELDS]
+    return dict(fields=fields, label=' '.join(f for f in fields if f))
+
+
+def fold_word(word):
+    word = ''.join(CYR.get(c, c) for c in word)
+    word = re.sub('[jy]', 'i', word).replace('kh', 'h').replace('x', 'ks')
+    word = re.sub('shch|sch', 'sh', word)
+    word = ''.join(c for c in word if c.isalnum())
+    return re.sub(r'(.)\1+', r'\1', word)
+
+
+def name_key(text):
+    """Twin of nameKey in app/js/autofile.js: order, case, ё and Cyrillic/Latin spelling ignored."""
+    return ' '.join(sorted(w for w in map(fold_word, nfc(text or '').lower().split()) if w))
+
+
+def title_case(text):
+    return re.sub(r'(^|[\s-])([^\W\d_])', lambda m: m.group(1) + m.group(2).upper(), text)
 
 
 def nfc(text):
@@ -253,23 +297,28 @@ class FolderWorker:
         parts = path.relative_to(inbox).parts
         folder = parts[0] if len(parts) == 2 else None
         try:
-            if not folder:
-                raise ValueError('Положите файл в папку с фамилией и именем пациента: Входящие/Фамилия Имя/')
             size = path.stat().st_size
             if size != SIZE:  # do not read big unrelated files into memory
                 raise ValueError(f'Это не файл ЭКГ прибора ECG301: {size} байт, ожидается {SIZE}. '
                                  'Если файл копировался долго, положите его во «Входящие» ещё раз.')
             record = record_from_ecg301(path.read_bytes(), path.name)
             owner = self.owner_of(record['sha256'])
-            patient, created = self.find_or_create_patient(folder, owner)
+            label = record['devicePatient']['label']
+            if folder:
+                patient, created = self.find_or_create_patient(folder, owner)
+            else:
+                patient, created = self.patient_by_device_name(record['devicePatient'], owner)
+            if label and not created:
+                patient = self.link_device_name(patient, label)
             existing = self.store.list_records(patient['id'])
             duplicate = owner is not None
             if not duplicate:
                 record['patientId'] = patient['id']
                 self.store.save_record(record)
             self.write_result(patient, record, duplicate, len(existing) + (0 if duplicate else 1))
-            self.move(path, self.root / DONE / safe_name(folder))
-            self._note(file=path.name, patient=folder, status='duplicate' if duplicate else 'ok', new_patient=created)
+            self.move(path, self.root / DONE / safe_name(folder or full_name(patient)))
+            self._note(file=path.name, patient=folder or full_name(patient), status='duplicate' if duplicate else 'ok',
+                       new_patient=created)
         except Exception as exc:  # any problem with one file must not stop the folder
             message = str(exc) if isinstance(exc, ValueError) else f'{type(exc).__name__}: {exc}'
             try:
@@ -286,6 +335,39 @@ class FolderWorker:
             if any(r.get('sha256') == sha for r in self.store.list_records(p['id'])):
                 return p
         return None
+
+    def patient_by_device_name(self, device, owner=None):
+        """Same rules as fileDeviceRecord in app/js/autofile.js."""
+        if owner is not None:
+            return owner, False
+        key = name_key(device['label'])
+        if not key:
+            raise ValueError('В файле не указано имя пациента. Положите его в папку пациента: Входящие/Фамилия Имя/')
+        patients = self.store.list_patients()
+        linked = [p for p in patients if key in (p.get('deviceLabels') or [])]
+        found = linked or [p for p in patients if key in (name_key(full_name(p)), name_key(full_name(p, middle=False)))]
+        if len(found) > 1:
+            raise ValueError(f'Несколько пациентов подходят к имени «{device["label"]}»: '
+                             + ', '.join(full_name(p) for p in found) + '. Положите файл в папку нужного пациента.')
+        if found:
+            return found[0], False
+        _, first, second = device['fields']
+        now = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        patient = dict(id=os.urandom(16).hex(), surname=title_case(first or second or device['label']),
+                       name=title_case(second) if first else '', middleName='', birthDate=None, sex=None,
+                       notes=f'Создан автоматически по имени из файла прибора: «{device["label"]}». '
+                             'Проверьте ФИО, дату рождения и пол.',
+                       deviceLabels=[key], createdAt=now, updatedAt=now)
+        return self.store.save_patient(patient), True
+
+    def link_device_name(self, patient, label):
+        """Remember the device name for this patient, so later files need no folder."""
+        key = name_key(label)
+        if not key or key in (patient.get('deviceLabels') or []):
+            return patient
+        patient = dict(patient, deviceLabels=(patient.get('deviceLabels') or []) + [key],
+                       updatedAt=datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
+        return self.store.save_patient(patient)
 
     def find_or_create_patient(self, folder, owner=None):
         words, birth = parse_folder(folder)
