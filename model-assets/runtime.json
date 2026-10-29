@@ -1,0 +1,10 @@
+{
+  "note": "Standalone CPython used by the desktop program to run the neural networks (astral-sh/python-build-standalone).",
+  "release": "20260929",
+  "python": "3.12.14",
+  "builds": {
+    "darwin-arm64": {"file": "cpython-3.12.14+20260929-aarch64-apple-darwin-install_only.tar.gz", "size": 25156032, "sha256": "de6b8f94fa765639b423ea353ab340669704c7186f96ee3cab389dcfde770c3c"},
+    "win32-amd64": {"file": "cpython-3.12.14+20260929-x86_64-pc-windows-msvc-install_only.tar.gz", "size": 46425719, "sha256": "28728baf30b65e263f0b25c5a85be8226e7ab0d212fbadd6a8f0f796139fa804"},
+    "linux-x86_64": {"file": "cpython-3.12.14+20260929-x86_64-unknown-linux-gnu-install_only.tar.gz", "size": 66919180, "sha256": "06c90b93f419b63371c18f20fed0558a1a901f6518c3c24f755077e048447e7f"}
+  }
+}

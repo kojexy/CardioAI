@@ -496,12 +496,7 @@ function stripTemplates(c) {
 async function viewAI() {
   const parts = [h('h1', {}, 'Анализ ИИ')];
   if (state.status) {
-    const m = state.status.models || {};
-    parts.push(card(h('p', {}, 'Нейросети работают только на этом компьютере. Запись в интернет не отправляется.'),
-      h('div', { class: 'row' }, [['efficientnet', 'DeepECG SL'], ['wcr', 'DeepECG SSL'], ['ecgfounder', 'ECGFounder']].map(([k, l]) =>
-        h('span', { class: 'pill ' + (m[k] ? 'lvl-none' : 'lvl-minor') }, l + (m[k] ? ' · установлена' : ' · не установлена')))),
-      h('p', {}, h('a', { href: '/' }, 'Открыть модуль запуска моделей →')),
-      h('p', { class: 'muted' }, 'После расчёта откройте ЭКГ пациента и нажмите «Прикрепить расчёт» — оценки появятся в профиле и в сравнении.')));
+    parts.push(setupCard());
   } else {
     parts.push(card(h('p', {}, 'В веб-версии и на Android нейросети не запускаются: модели весят около 3 ГБ и требуют компьютера.'),
       h('p', {}, 'Запустите расчёт в программе CardioAI для Windows или Mac, скачайте результат JSON и прикрепите его к ЭКГ пациента здесь.'),
@@ -509,6 +504,47 @@ async function viewAI() {
   }
   parts.push(notice(DISCLAIMER));
   view.replaceChildren(...parts);
+}
+
+// Status and one-click install of the neural networks (desktop program only).
+function setupCard() {
+  const box = card(h('h2', {}, 'Нейросети на этом компьютере'), h('p', { class: 'muted' }, 'Проверка…'));
+  const token = document.querySelector('meta[name="cardioai-token"]')?.content;
+  let timer = null;
+  const draw = st => {
+    const m = st.models || {};
+    const all = ['efficientnet', 'wcr', 'ecgfounder'].every(k => m[k]);
+    const bar = h('progress', { max: 1, value: st.progress || 0, style: 'width:100%' });
+    const button = h('button', { class: 'primary', disabled: st.running || !st.supported, onclick: async () => {
+      button.disabled = true;
+      const r = await fetch('/api/setup/start', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-ECG-Token': token }, body: '{}' });
+      const data = await r.json();
+      if (!r.ok) { draw({ ...st, error: data.error }); return; }
+      draw(data); poll();
+    } }, all ? 'Переустановить / проверить' : 'Установить нейросети');
+    box.replaceChildren(h('h2', {}, 'Нейросети на этом компьютере'),
+      h('p', {}, 'Расчёт идёт только здесь. Запись ЭКГ в интернет не отправляется.'),
+      h('div', { class: 'row' }, [['efficientnet', 'DeepECG SL'], ['wcr', 'DeepECG SSL'], ['ecgfounder', 'ECGFounder']].map(([k, l]) =>
+        h('span', { class: 'pill ' + (m[k] ? 'lvl-none' : 'lvl-minor') }, l + (m[k] ? ' · готова' : ' · не установлена')))),
+      ...(st.warnings || []).map(w => notice(w)),
+      st.running || st.finished || st.error ? h('div', {}, bar, h('p', { class: st.error ? 'error' : 'muted' }, st.error || st.message)) : null,
+      all && !st.running ? h('p', {}, h('a', { href: '/' }, 'Открыть модуль запуска моделей →')) : null,
+      !all || st.error ? h('p', { class: 'muted' }, `Один раз скачивается около 4 ГБ: Python, PyTorch и веса моделей с официальных страниц авторов; каждый файл проверяется по контрольной сумме. Нужно около 7 ГБ свободного места${st.free_gb != null ? ' (сейчас свободно ' + st.free_gb + ' ГБ)' : ''}. Папка: ${st.work_dir}.`) : null,
+      st.supported ? null : notice('Для этого компьютера нет готовой сборки нейросетей. Поддерживаются Windows x64, Mac на Apple Silicon и Linux x64.'),
+      h('div', { class: 'row' }, button),
+      h('p', { class: 'muted' }, 'После расчёта откройте ЭКГ пациента и нажмите «Прикрепить расчёт» — оценки появятся в профиле и в сравнении.'));
+  };
+  const poll = async () => {
+    clearTimeout(timer);
+    if (!box.isConnected && timer) return;
+    try {
+      const st = await (await fetch('/api/setup')).json();
+      draw(st);
+      if (st.running) timer = setTimeout(poll, 1500);
+    } catch (err) { box.replaceChildren(h('p', { class: 'error' }, 'Нет связи с программой: ' + err.message)); }
+  };
+  poll();
+  return box;
 }
 
 async function viewSettings() {

@@ -3,16 +3,16 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / 'model-assets'
-WORK = ROOT / 'work'
+WORK = Path(os.environ.get('CARDIOAI_WORK') or ROOT / 'work')
 
 
 def sha256(path):
@@ -68,9 +68,53 @@ def sources():
                     out.parent.mkdir(parents=True, exist_ok=True)
                     out.write_bytes(tar.extractfile(member).read())
             if source['folder'] == 'fairseq-signals':
-                subprocess.run(['patch', '--batch', '-p1', '-i', str(ROOT / 'outputs/ecg-reader/fairseq-python312-compat.patch')], cwd=staging, check=True)
+                apply_patch(ROOT / 'outputs/ecg-reader/fairseq-python312-compat.patch', staging)
             (staging / marker.name).write_text(json.dumps(source, indent=2))
             staging.replace(target)
+
+
+def apply_patch(patch_file, folder):
+    """Apply a unified diff (-p1) in pure Python, so no `patch` tool is needed (Windows).
+    Every context and removed line must match exactly; otherwise nothing is written."""
+    lines = patch_file.read_text().splitlines()
+    changes, i = {}, 0
+    while i < len(lines):
+        if lines[i].startswith('+++ '):
+            name = lines[i][4:].split('\t')[0]
+            name = name[2:] if name.startswith('b/') else name
+            hunks = changes.setdefault(name, [])
+            i += 1
+            while i < len(lines) and lines[i].startswith('@@'):
+                start = int(lines[i].split()[1].split(',')[0][1:])
+                old, new = [], []
+                i += 1
+                while i < len(lines) and not lines[i].startswith(('@@', 'diff ', '--- ')):
+                    tag, text = lines[i][:1], lines[i][1:]
+                    if tag in (' ', ''):
+                        old.append(text); new.append(text)
+                    elif tag == '-':
+                        old.append(text)
+                    elif tag == '+':
+                        new.append(text)
+                    i += 1
+                hunks.append((start, old, new))
+            continue
+        i += 1
+    results = {}
+    for name, hunks in changes.items():
+        target = folder / name
+        text = target.read_text()
+        source = text.splitlines()
+        offset = 0
+        for start, old, new in hunks:
+            at = start - 1 + offset
+            if source[at:at + len(old)] != old:
+                raise ValueError(f'Patch does not match {name} near line {start}')
+            source[at:at + len(old)] = new
+            offset += len(new) - len(old)
+        results[target] = '\n'.join(source) + ('\n' if text.endswith('\n') else '')
+    for target, text in results.items():
+        target.write_text(text)
 
 
 def weights():

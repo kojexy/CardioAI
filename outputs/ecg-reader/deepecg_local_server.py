@@ -20,6 +20,7 @@ import webbrowser
 
 from ecg_reader import LEADS
 from patient_store import PatientStore
+from model_setup import ModelSetup, runtime_python, work_dir
 
 # In a packaged desktop build the module sits at the bundle root; resources keep repo layout.
 APP = (Path(sys._MEIPASS) / 'outputs/ecg-reader' if getattr(sys, 'frozen', False)
@@ -32,14 +33,9 @@ STATIC_TYPES = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
                 '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json'}
 
 
-def code_home():
-    """Folder with the CardioAI source checkout and work/ (models, venv)."""
-    return Path(os.environ.get('CARDIOAI_HOME') or APP.parents[1])
-
-
 def upstream_thresholds():
     """Per-label DeepECG operating points from the installed upstream (not redistributed here)."""
-    path = code_home() / 'work/DeepECG_Docker/thresholds/77_tasks_final.json'
+    path = work_dir() / 'DeepECG_Docker/thresholds/77_tasks_final.json'
     try:
         table = strict_json(path.read_text())
     except (OSError, ValueError):
@@ -54,11 +50,23 @@ def upstream_thresholds():
 
 
 def model_python():
-    home = code_home()
-    for candidate in (home / 'work/deepecg-venv/bin/python', home / 'work/deepecg-venv/Scripts/python.exe'):
+    """Python that runs the models: the program's own runtime, an older venv, or (from source) this one."""
+    work = work_dir()
+    managed = runtime_python(work)
+    if managed:
+        return str(managed)
+    for candidate in (work / 'deepecg-venv/bin/python', work / 'deepecg-venv/Scripts/python.exe'):
         if candidate.is_file():
             return str(candidate)
     return None if getattr(sys, 'frozen', False) else sys.executable
+
+
+def terminate(process):
+    """Stop a model process and its children (process group on macOS/Linux)."""
+    if hasattr(os, 'killpg'):
+        os.killpg(process.pid, signal.SIGTERM)
+    else:
+        process.terminate()
 
 
 def strict_json(data):
@@ -109,6 +117,7 @@ class LocalServer(ThreadingHTTPServer):
         self.runs = Path(runs) if runs else APP / 'local-runs'
         self.runs.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.store = PatientStore(self.runs / 'cardioai-store')
+        self.setup = ModelSetup()
         self.jobs = {}
         self.slot = threading.BoundedSemaphore(1)
         for entry in sorted(self.runs.glob('*/job.json')):
@@ -137,22 +146,22 @@ class LocalServer(ThreadingHTTPServer):
             self.stopping = True
             for child in tuple(self.children):
                 if child.poll() is None:
-                    os.killpg(child.pid, signal.SIGTERM)
+                    terminate(child)
         super().server_close()
 
     def models(self):
-        home = code_home()
+        work = work_dir()
         if model_python() is None:
             return {'efficientnet': False, 'wcr': False, 'ecgfounder': False}
-        weights = home / 'work/deepecg-weights'
+        weights = work / 'deepecg-weights'
         names = {'efficientnet': ['efficientnet_deepecg_unscaled.pt'],
                  'wcr': ['base_ssl.pt', 'wcr_77_classes.pt']}
         found = {key: all((weights / name).is_file() and
                          (weights / (name + '.json')).is_file() for name in files)
                 for key, files in names.items()}
-        founder = home / 'work/ecgfounder-weights/12_lead_ECGFounder.pth'
+        founder = work / 'ecgfounder-weights/12_lead_ECGFounder.pth'
         found['ecgfounder'] = (founder.is_file() and founder.with_suffix('.pth.json').is_file()
-                               and (home / 'outputs/ecg-reader/ecgfounder-source-manifest.json').is_file())
+                               and (APP / 'ecgfounder-source-manifest.json').is_file())
         return found
 
     def start_job(self, data):
@@ -201,10 +210,10 @@ class LocalServer(ThreadingHTTPServer):
     def worker(self, job_id, folder, mode, model):
         process = None
         try:
-            scripts = code_home() / 'outputs/ecg-reader'
+            scripts = APP
             python = model_python()
             if python is None:
-                raise RuntimeError('Не найдено окружение моделей (work/deepecg-venv)')
+                raise RuntimeError('Нейросети не установлены. Откройте «Анализ ИИ» → «Установить нейросети».')
             command = ([python, str(scripts / 'ecgfounder_run_local.py')]
                        if model == 'ecgfounder' else
                        [python, str(scripts / 'deepecg_run_local.py'), '--model', model])
@@ -214,12 +223,13 @@ class LocalServer(ThreadingHTTPServer):
                 with self.lock:
                     if self.stopping:
                         raise RuntimeError('Локальная программа остановлена')
-                    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                    env = dict(os.environ, CARDIOAI_WORK=str(work_dir()), PYTHONDONTWRITEBYTECODE='1')
+                    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)
                     self.children.add(process)
                 try:
                     returncode = process.wait(timeout=600)
                 except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    terminate(process)
                     process.wait(timeout=10)
                     raise RuntimeError('Превышено время расчёта — 10 минут') from None
             if returncode:
@@ -302,6 +312,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.answer(200, dict(app='ECG301-DeepECG-local', version=4,
                                         models=self.server.models(), local_only=True,
                                         storage=True, data_dir=str(self.server.store.root)))
+        if self.path == '/api/setup':
+            return self.answer(200, self.server.setup.status(self.server.models()))
         if self.path == '/api/thresholds':
             return self.answer(200, upstream_thresholds())
         if self.path == '/app':
@@ -409,6 +421,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.answer(200, report)
             if self.path == '/api/run':
                 return self.answer(202, self.server.start_job(data))
+            if self.path == '/api/setup/start':
+                self.server.setup.start()
+                return self.answer(202, self.server.setup.status(self.server.models()))
             if self.path == '/api/store/patient':
                 return self.answer(200, self.server.store.save_patient(data))
             if self.path == '/api/store/record':

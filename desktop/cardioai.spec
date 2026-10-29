@@ -11,12 +11,18 @@ for name in ['DeepECG-local.html', 'ECG301-reader.html', 'research-labels-ru.jso
              'ecgfounder-source-manifest.json', 'deepecg-metadata.template.json']:
     datas.append((str(reader / name), 'outputs/ecg-reader'))
 datas.append((str(reader / 'verification'), 'outputs/ecg-reader/verification'))
+# Model scripts run later by the program's own Python, so they ship as plain files too.
+for path in list(reader.glob('*.py')) + [reader / 'fairseq-python312-compat.patch']:
+    if not path.name.startswith('test_'):
+        datas.append((str(path), 'outputs/ecg-reader'))
+datas += [(str(root / 'scripts' / 'setup_models.py'), 'scripts'), (str(root / 'model-assets'), 'model-assets'),
+          (str(root / 'requirements.txt'), '.')]
 
 a = Analysis(
     [str(root / 'desktop' / 'cardioai_desktop.py')],
     pathex=[str(reader)],
     datas=datas,
-    hiddenimports=['deepecg_local_server', 'patient_store', 'ecg_reader', 'founder_report', 'research_report'],
+    hiddenimports=['deepecg_local_server', 'patient_store', 'model_setup', 'ecg_reader', 'founder_report', 'research_report'],
     excludes=['numpy', 'scipy', 'torch', 'pandas', 'matplotlib', 'tkinter'],
 )
 pyz = PYZ(a.pure)

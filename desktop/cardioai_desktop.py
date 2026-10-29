@@ -27,25 +27,27 @@ def data_dir():
     return base / 'CardioAI'
 
 
-def find_models_home(data):
-    """Folder of a full CardioAI checkout with installed models, if any."""
-    settings = data / 'settings.json'
-    candidates = []
-    if os.environ.get('CARDIOAI_HOME'):
-        candidates.append(Path(os.environ['CARDIOAI_HOME']))
+def choose_work_dir(data):
+    """Folder for the neural networks (runtime, sources, weights).
+
+    Order: CARDIOAI_WORK; "work_dir" in settings.json of the data folder; an existing
+    install with weights (source checkout); otherwise <data folder>/work, where the
+    "Install neural networks" button puts everything.
+    """
+    if os.environ.get('CARDIOAI_WORK'):
+        return Path(os.environ['CARDIOAI_WORK'])
     try:
-        configured = json.loads(settings.read_text(encoding='utf-8')).get('cardioai_home')
+        configured = json.loads((data / 'settings.json').read_text(encoding='utf-8')).get('work_dir')
         if configured:
-            candidates.append(Path(configured))
+            return Path(configured)
     except (OSError, ValueError, AttributeError):
         pass
-    if not getattr(sys, 'frozen', False):
-        candidates.append(Path(__file__).resolve().parents[1])
-    candidates += [Path.home() / 'CardioAI', Path.home() / 'Projects/CardioAI']
-    for home in candidates:
-        if (home / 'outputs/ecg-reader/deepecg_run_local.py').is_file() and (home / 'work').is_dir():
-            return home
-    return None
+    candidates = [Path(__file__).resolve().parents[1] / 'work'] if not getattr(sys, 'frozen', False) else []
+    candidates += [Path.home() / 'CardioAI/work', Path.home() / 'Projects/CardioAI/work']
+    for work in candidates:
+        if (work / 'deepecg-weights').is_dir():
+            return work
+    return data / 'work'
 
 
 class Api:
@@ -68,14 +70,22 @@ def main():
     data = data_dir()
     data.mkdir(parents=True, exist_ok=True)
     os.environ['CARDIOAI_DATA'] = str(data)
-    home = find_models_home(data)
-    if home:
-        os.environ['CARDIOAI_HOME'] = str(home)
+    os.environ['CARDIOAI_WORK'] = str(choose_work_dir(data))
     from deepecg_local_server import LocalServer
-    server = LocalServer(0)
+    headless = '--headless' in sys.argv
+    port = int(os.environ.get('CARDIOAI_PORT', '0'))
+    server = LocalServer(port)
     url = f'http://127.0.0.1:{server.server_address[1]}/app/'
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    if headless:
+        # Server only (tests, or a home PC serving other devices later).
+        print('CardioAI: ' + url, flush=True)
+        try:
+            thread.join()
+        except KeyboardInterrupt:
+            server.shutdown()
+        return
     try:
         import webview
     except ImportError:

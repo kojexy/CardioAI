@@ -1,0 +1,38 @@
+name: Full install test (program + neural networks)
+# Builds the program, presses "Install neural networks" on a clean machine
+# (about 3.5 GB of downloads) and runs the self-test of all three models.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'feature/**']
+    paths:
+      - requirements.txt
+      - model-assets/**
+      - scripts/setup_models.py
+      - scripts/ci_check_app.py
+      - outputs/ecg-reader/*.py
+      - desktop/**
+      - .github/workflows/full-install.yml
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            program: dist/CardioAI/CardioAI.exe
+          - os: macos-latest
+            program: dist/CardioAI.app/Contents/MacOS/CardioAI
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the program
+        run: |
+          python -m pip install -r desktop/requirements-desktop.txt
+          pyinstaller --noconfirm desktop/cardioai.spec
+      - name: Install neural networks from inside the program and run all models
+        run: python scripts/ci_check_app.py ${{ matrix.program }} --install

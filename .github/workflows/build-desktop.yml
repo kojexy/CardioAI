@@ -16,8 +16,6 @@ jobs:
             name: CardioAI-Windows
           - os: macos-latest
             name: CardioAI-macOS-AppleSilicon
-          - os: macos-13
-            name: CardioAI-macOS-Intel
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +26,12 @@ jobs:
         run: python -m pip install -r desktop/requirements-desktop.txt
       - name: Build
         run: pyinstaller --noconfirm desktop/cardioai.spec
+      - name: Check the built program (macOS)
+        if: runner.os == 'macOS'
+        run: python scripts/ci_check_app.py dist/CardioAI.app/Contents/MacOS/CardioAI
+      - name: Check the built program (Windows)
+        if: runner.os == 'Windows'
+        run: python scripts/ci_check_app.py dist/CardioAI/CardioAI.exe
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: ditto -c -k --keepParent dist/CardioAI.app ${{ matrix.name }}.zip

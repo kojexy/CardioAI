@@ -12,9 +12,12 @@ import numpy as np
 import pandas as pd
 import torch
 
+import os
 ROOT = Path(__file__).resolve().parents[2]
-UPSTREAM = ROOT / 'work/DeepECG_Docker'
-WEIGHT_DIR = ROOT / 'work/deepecg-weights'
+# Models, sources and runtime: <repo>/work, or CARDIOAI_WORK for the desktop program.
+WORK = Path(os.environ.get('CARDIOAI_WORK') or ROOT / 'work')
+UPSTREAM = WORK / 'DeepECG_Docker'
+WEIGHT_DIR = WORK / 'deepecg-weights'
 
 
 def verified_weight(name):
@@ -74,7 +77,7 @@ def infer(signal, architecture='efficientnet'):
     else:
         path, manifest = verified_weight('wcr_77_classes.pt')
         base, base_manifest = verified_weight('base_ssl.pt')
-        sys.path.insert(0, str(ROOT / 'work/fairseq-signals'))
+        sys.path.insert(0, str(WORK / 'fairseq-signals'))
         from fairseq_signals.utils import checkpoint_utils
         model, _, _ = checkpoint_utils.load_model_and_task(
             str(path), arg_overrides={'model_path':str(base)}, suffix='')
