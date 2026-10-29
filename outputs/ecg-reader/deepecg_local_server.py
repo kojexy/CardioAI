@@ -475,7 +475,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/run':
                 return self.answer(202, self.server.start_job(data))
             if self.path == '/api/setup/start':
-                self.server.setup.start()
+                self.server.setup.start(data.get('models'))
                 return self.answer(202, self.server.setup.status(self.server.models()))
             if self.path == '/api/setup/cancel':
                 self.server.setup.stop()

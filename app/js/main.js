@@ -6,8 +6,9 @@ import { RULES, MEASURE_LABELS } from './rules.js';
 import { openStore, newId, exportAll, importAll } from './store.js';
 import { trendChart, beatOverlay, stripChart } from './charts.js';
 import { toMillivolts } from './signal.js';
-import { saveFile, readFile } from './files.js';
+import { saveFile, readFile, printReport } from './files.js';
 import { fileDeviceRecord, linkDeviceName } from './autofile.js';
+import { recordReport, comparisonReport } from './report.js';
 
 const state = { store: null, status: null, labelsRu: {}, thresholds: {} };
 const view = document.getElementById('view');
@@ -73,6 +74,41 @@ async function recordFromECG301(buffer, fileName) {
 
 const MODEL_KEYS = { 'heartwise/EfficientNetV2_77_Classes': 'efficientnet', 'heartwise/WCR_77_Classes': 'wcr', 'PKUDigitalHealth/ECGFounder': 'ecgfounder' };
 const MODEL_NAMES = { efficientnet: 'DeepECG SL (EfficientNetV2)', wcr: 'DeepECG SSL (WCR)', ecgfounder: 'ECGFounder' };
+// Which network's scores to show and print: all or one, remembered on this device.
+const MODEL_PREF = 'cardioai-model';
+function showModel(container, value) {
+  for (const e of container.querySelectorAll('[data-model]')) e.classList.toggle('hidden', value !== 'all' && e.dataset.model !== value);
+}
+function modelPicker(container, keys) {
+  if (keys.length < 2) return null;
+  let value = 'all';
+  try { value = localStorage.getItem(MODEL_PREF) || 'all'; } catch { /* storage blocked: show all */ }
+  if (!keys.includes(value)) value = 'all';
+  const select = h('select', { onchange: () => {
+    try { localStorage.setItem(MODEL_PREF, select.value); } catch { /* remembered for this page only */ }
+    showModel(container, select.value);
+  } }, h('option', { value: 'all' }, 'все'), keys.map(k => h('option', { value: k }, MODEL_NAMES[k] || k)));
+  select.value = value;
+  showModel(container, value);
+  return h('label', { class: 'inline no-print' }, 'Нейросеть: ', select);
+}
+
+// Print button: a separate A4 report (report.js), not the screen. Only the chosen network is printed.
+function printButton(title, build) {
+  return h('button', { onclick: async () => {
+    try {
+      let model = 'all';
+      try { model = localStorage.getItem(MODEL_PREF) || 'all'; } catch { /* print all */ }
+      await printReport(build({ labelsRu: state.labelsRu, model }), title);
+    } catch (err) { alert('Не удалось подготовить печать: ' + err.message); }
+  } }, 'Печать');
+}
+// The report for one ECG also shows its comparison with the ECG before it.
+function recordReportFor(patient, records, record, ctx) {
+  const sorted = sortByDate(records), older = sorted[sorted.indexOf(record) + 1];
+  return recordReport(patient, record, { ...ctx, previous: older ? compareRecords(older, record, { sex: patient.sex }) : null });
+}
+
 function aiEntry(report, extra = {}) {
   if (!report || typeof report.scores !== 'object') throw Error('В файле нет оценок модели (поле scores)');
   const key = MODEL_KEYS[report.model] || String(report.model || 'model');
@@ -180,6 +216,7 @@ async function viewPatient(id) {
     patient.notes ? h('p', {}, patient.notes) : null,
     h('div', { class: 'row no-print' },
       h('button', { onclick: () => edit.classList.toggle('hidden') }, 'Изменить данные'),
+      records.length ? h('button', { onclick: () => { location.hash = `#/record/${patient.id}/${sortByDate(records)[0].id}`; } }, 'Последняя ЭКГ и печать') : null,
       h('button', { class: 'danger', onclick: async () => {
         if (!await confirmAction(`Удалить пациента «${fullName(patient)}» и все его ЭКГ (${records.length})? Это нельзя отменить.`)) return;
         await state.store.deletePatient(patient.id); location.hash = '#/patients';
@@ -341,7 +378,7 @@ async function viewRecord(pid, rid) {
   parts.push(card(h('h2', {}, 'Действия'), h('p', { class: 'muted' }, 'Исходные ЭКГ — записи в спокойном состоянии, с которыми сравниваются новые. Если отмечено несколько, берётся их среднее.'), h('div', { class: 'row' },
     h('button', { onclick: () => saveFile(JSON.stringify({ format: 'cardioai-record', version: 1, record: { ...record, patientId: undefined } }, null, 2),
       `ECG-${(record.recordedAt || 'record').slice(0, 10)}.json`, 'application/json') }, 'Скачать запись'),
-    h('button', { onclick: () => window.print() }, 'Печать'),
+    printButton(`ЭКГ ${fullName(patient)} ${fmtDate(record.recordedAt)}`, ctx => recordReportFor(patient, records, record, ctx)),
     h('button', { onclick: async () => { record.isBaseline = !record.isBaseline; await state.store.saveRecord(record); route(); } },
       record.isBaseline ? 'Снять отметку «исходная»' : 'Отметить как исходную (базовую)'),
     h('button', { class: 'danger', onclick: async () => {
@@ -368,7 +405,7 @@ function aiCard(patient, record) {
       ? Object.entries(entry.scores).filter(([l]) => t[l]).map(([l, v]) => [l, v, logitMargin(v, t[l])]).sort((a, b) => b[2] - a[2])
       : Object.entries(entry.scores).sort((a, b) => b[1] - a[1]).map(([l, v]) => [l, v, null]);
     const above = t ? ranked.filter(r => r[2] > 0) : ranked.slice(0, 10);
-    box.append(h('h3', {}, entry.model || key),
+    box.append(h('div', { 'data-model': key }, h('h3', {}, entry.model || key),
       entry.synthetic ? notice('Это технический тест на искусственном сигнале, а не оценка этой ЭКГ.') : null,
       t ? h('p', { class: 'muted' }, `Выше рабочего порога авторов модели: ${above.length} из ${ranked.length}. Порог — баланс чувствительности и специфичности на данных авторов, не на ECG301.`)
         : notice('Для этой модели нет опубликованных порогов: сырые оценки 0–1 нельзя читать как «есть/нет».'),
@@ -380,8 +417,10 @@ function aiCard(patient, record) {
           Object.entries(entry.scores).sort((a, b) => b[1] - a[1]).map(([label, v]) => h('tr', {}, h('td', {}, labelRu(label)), h('td', { class: 'num' }, v.toFixed(4)))))))),
       h('button', { class: 'danger no-print', onclick: async () => {
         const ai = { ...record.ai }; delete ai[key]; record.ai = ai; await state.store.saveRecord(record); route();
-      } }, 'Открепить'));
+      } }, 'Открепить')));
   }
+  const picker = modelPicker(box, entries.map(([key]) => key));
+  if (picker) box.firstChild.after(picker);
   const jsonFile = h('input', { type: 'file', accept: '.json,application/json' });
   const controls = h('div', { class: 'no-print' }, h('h3', {}, 'Прикрепить результат'),
     h('label', {}, 'Файл результата модели (JSON из модуля «Анализ ИИ»)', jsonFile),
@@ -443,17 +482,22 @@ function comparisonView(c, patient, { compact = false } = {}) {
       h('p', { class: 'muted' }, '* Масштаб в мВ для файлов ECG301 приблизителен. Изменение формы может быть вызвано положением электродов — проверяйте наложение.'));
     } else out.append(h('p', { class: 'muted' }, w.reason));
 
-    out.append(h('h3', {}, 'Оценки нейросетей'));
+    const aiHead = h('h3', {}, 'Оценки нейросетей');
+    out.append(aiHead);
     if (!c.scores.length) out.append(h('p', { class: 'muted' }, 'Для сравнения нужны результаты одной и той же модели на обеих ЭКГ.'));
     for (const s of c.scores) {
-      out.append(h('p', {}, h('b', {}, s.modelName), s.synthetic ? ' — внимание: есть искусственный тест' : ''));
-      if (!s.changes.length) { out.append(h('p', { class: 'muted' }, 'Существенных изменений оценок нет.')); continue; }
-      if (!s.sameWeights) out.append(notice('Версии весов модели на двух ЭКГ различаются — оценки сравнивать нельзя.'));
-      out.append(h('div', { class: 'scroll' }, h('table', {}, h('tbody', {}, s.changes.map(x => h('tr', {}, h('td', {}, labelRu(x.label)),
+      const section = h('div', { 'data-model': s.model });
+      out.append(section);
+      section.append(h('p', {}, h('b', {}, s.modelName), s.synthetic ? ' — внимание: есть искусственный тест' : ''));
+      if (!s.changes.length) { section.append(h('p', { class: 'muted' }, 'Существенных изменений оценок нет.')); continue; }
+      if (!s.sameWeights) section.append(notice('Версии весов модели на двух ЭКГ различаются — оценки сравнивать нельзя.'));
+      section.append(h('div', { class: 'scroll' }, h('table', {}, h('tbody', {}, s.changes.map(x => h('tr', {}, h('td', {}, labelRu(x.label)),
         h('td', { class: 'num' }, `${x.a.toFixed(2)} → ${x.b.toFixed(2)}`),
         h('td', {}, [x.crossed ? (x.b > x.a ? `стала выше порога ${x.threshold}` : `стала ниже порога ${x.threshold}`) : null, x.concordant ? 'та же метка так же изменилась в другой модели' : 'только эта модель'].filter(Boolean).join('; ')),
         h('td', {}, pill(x.level))))))));
     }
+    const picker = modelPicker(out, c.scores.map(s => s.model));
+    if (picker) aiHead.after(picker);
     if (c.concordant.length) out.append(h('p', {}, h('b', {}, 'Согласованные изменения (SL и SSL, одна и та же метка): '), c.concordant.map(g => `${labelRu(g.label)} ${g.direction === 'up' ? '↑' : '↓'}`).join(', ')),
       h('p', { class: 'muted' }, 'SL и SSL обучены на общих данных, поэтому их согласие — не полностью независимое подтверждение.'));
     out.append(notice('Оценки моделей не откалиброваны как вероятности; небольшие колебания между записями нормальны. В итог выносятся только изменения, в которых согласны хотя бы две модели. ' + DISCLAIMER));
@@ -473,7 +517,7 @@ async function viewCompare(pid, a, b) {
     const c = compareRecords(ra, rb, { sex: patient.sex });
     view.replaceChildren(h('p', { class: 'no-print' }, h('a', { href: '#/patient/' + pid }, '← ' + fullName(patient))),
       card(h('h1', {}, 'Сравнение ЭКГ · ' + fullName(patient)), comparisonView(c, patient),
-        h('div', { class: 'row no-print', style: 'margin-top:12px' }, h('button', { onclick: () => window.print() }, 'Печать'),
+        h('div', { class: 'row no-print', style: 'margin-top:12px' }, printButton('Сравнение ЭКГ ' + fullName(patient), ctx => comparisonReport(patient, c, ctx)),
           h('button', { onclick: () => saveFile(JSON.stringify(stripTemplates(c), null, 2), 'ECG-comparison.json', 'application/json') }, 'Скачать JSON'))));
     return;
   }
@@ -538,34 +582,60 @@ async function viewAI() {
   view.replaceChildren(...parts);
 }
 
+// Neural networks: key (as in the server and result files), name, what it gives.
+const MODELS = [
+  ['efficientnet', 'DeepECG SL', 'быстрая, 77 заключений'],
+  ['wcr', 'DeepECG SSL', '77 заключений, обычно точнее SL'],
+  ['ecgfounder', 'ECGFounder', '150 заключений'],
+];
+
 // Status and one-click install of the neural networks (desktop program only).
 function setupCard() {
   const box = card(h('h2', {}, 'Нейросети на этом компьютере'), h('p', { class: 'muted' }, 'Проверка…'));
   const token = document.querySelector('meta[name="cardioai-token"]')?.content;
-  let timer = null;
+  let timer = null, chosen = null;
   const gb = v => Number(v).toLocaleString('ru-RU', { maximumFractionDigits: 1 });
   const draw = st => {
     const m = st.models || {};
-    const all = ['efficientnet', 'wcr', 'ecgfounder'].every(k => m[k]);
+    const all = MODELS.every(([k]) => m[k]);
+    // Which networks to install: by default all that are not installed yet (or all, to re-check).
+    chosen ??= new Set(MODELS.map(([k]) => k).filter(k => all || !m[k]));
+    const need = () => {
+      const weights = [...chosen].reduce((sum, k) => sum + (st.model_gb?.[k] || 0), 0);
+      const total = (st.base_gb || 0) + weights;
+      return total && !st.base_gb ? total + 0.5 : total;
+    };
     // pip reports no progress: show a moving bar instead of a bar stuck at 0 %.
     const bar = h('progress', st.step === 'packages' && st.running ? { style: 'width:100%' } : { max: 1, value: st.progress || 0, style: 'width:100%' });
     const post = async path => {
-      const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-ECG-Token': token }, body: '{}' });
+      const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-ECG-Token': token }, body: JSON.stringify({ models: [...chosen] }) });
       const data = await r.json();
       if (!r.ok) { draw({ ...st, error: data.error }); return; }
       draw(data); poll();
     };
-    const button = h('button', { class: 'primary', disabled: st.running || !st.supported, onclick: () => { button.disabled = true; post('/api/setup/start'); } },
-      all ? 'Переустановить / проверить' : (st.error ? 'Продолжить установку' : 'Установить нейросети'));
+    const button = h('button', { class: 'primary', disabled: st.running || !st.supported || !chosen.size, onclick: () => { button.disabled = true; post('/api/setup/start'); } },
+      all ? 'Переустановить / проверить' : (st.error ? 'Продолжить установку' : 'Установить выбранные'));
+    const size = h('p', { class: 'muted' });
+    const showSize = () => {
+      size.textContent = `Нужно ещё около ${gb(need())} ГБ свободного места${st.free_gb != null ? ' (сейчас свободно ' + gb(st.free_gb) + ' ГБ)' : ''}. Папка: ${st.work_dir}.`;
+      button.disabled = st.running || !st.supported || !chosen.size;
+    };
+    const choice = h('fieldset', { class: 'models' }, h('legend', {}, 'Какие нейросети установить'),
+      MODELS.map(([k, label, about]) => h('label', { class: 'check' },
+        h('input', { type: 'checkbox', checked: chosen.has(k), disabled: st.running, onchange: e => { e.target.checked ? chosen.add(k) : chosen.delete(k); showSize(); } }),
+        h('span', {}, h('b', {}, label), ` — ${about}`, m[k] ? ' · уже установлена' : st.model_gb?.[k] === 0 ? ' · веса уже на диске' : st.model_gb ? ` · ${gb(Math.max(st.model_gb[k], 0.01))} ГБ` : ''))));
+    showSize();
     const cancel = st.running ? h('button', { onclick: () => post('/api/setup/cancel') }, 'Отменить') : null;
     fill(box, h('h2', {}, 'Нейросети на этом компьютере'),
       h('p', {}, 'Расчёт идёт только здесь. Запись ЭКГ в интернет не отправляется.'),
-      h('div', { class: 'row' }, [['efficientnet', 'DeepECG SL'], ['wcr', 'DeepECG SSL'], ['ecgfounder', 'ECGFounder']].map(([k, l]) =>
+      h('div', { class: 'row' }, MODELS.map(([k, l]) =>
         h('span', { class: 'pill ' + (m[k] ? 'lvl-none' : 'lvl-minor') }, l + (m[k] ? ' · готова' : ' · не установлена')))),
       ...(st.warnings || []).map(w => notice(w)),
       st.running || st.finished || st.error ? h('div', {}, bar, h('p', { class: st.error ? 'error' : 'muted' }, st.error || st.message)) : null,
       all && !st.running ? h('p', {}, h('a', { href: '/' }, 'Открыть модуль запуска моделей →')) : null,
-      !all || st.error ? h('p', { class: 'muted' }, `Один раз скачивается около 4 ГБ: Python, PyTorch и веса моделей с официальных страниц авторов; каждый файл проверяется по контрольной сумме. Прерванная загрузка продолжается с того же места. Нужно ещё около ${gb(st.need_gb ?? 7)} ГБ свободного места${st.free_gb != null ? ' (сейчас свободно ' + gb(st.free_gb) + ' ГБ)' : ''}. Папка: ${st.work_dir}.`) : null,
+      !st.running ? choice : null,
+      !all || st.error ? h('p', { class: 'muted' }, 'Один раз скачиваются Python, PyTorch (около 1 ГБ) и веса выбранных моделей с официальных страниц авторов; каждый файл проверяется по контрольной сумме. Прерванная загрузка продолжается с того же места. Остальные нейросети можно добавить позже.') : null,
+      size,
       st.supported ? null : notice('Для этого компьютера нет готовой сборки нейросетей. Поддерживаются Windows x64 и Mac на Apple Silicon (M1 и новее).'),
       h('div', { class: 'row' }, button, cancel),
       notice('Файл прибора ECG301 содержит 3 секунды записи, а моделям нужно 10 секунд с подтверждённой калибровкой. Поэтому по файлам прибора нейросети пока не запускаются. Готовый результат расчёта (файл JSON) можно прикрепить к ЭКГ пациента кнопкой «Прикрепить расчёт».'));

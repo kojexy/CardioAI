@@ -6,7 +6,8 @@ import { LEADS } from './ecg301.js';
 import { toMillivolts, medianBeats, compareTemplates, baselineSway } from './signal.js';
 
 const ORDER = { none: 0, small: 1, minor: 2, major: 3 };
-export const LEVEL_TEXT = { none: 'без изменений', small: 'в пределах погрешности', minor: 'заметное', major: 'значимое' };
+// Size of a difference by the program's thresholds, not its clinical significance (the doctor decides that).
+export const LEVEL_TEXT = { none: 'нет различий', small: 'небольшое, ниже порога', minor: 'умеренное', major: 'выраженное' };
 const raise = (level, to) => (ORDER[to] > ORDER[level] ? to : level);
 const cap = (level, to) => (ORDER[level] > ORDER[to] ? to : level);
 
@@ -119,7 +120,7 @@ export function compareWaveforms(a, b, rules = RULES) {
   const byName = Object.fromEntries(result.leads.map(l => [l.lead, l]));
   const kinds = {
     shape: { title: 'Изменилась форма комплекса', hit: l => l.level === 'minor' || l.level === 'major', major: l => l.level === 'major', show: l => l.lead },
-    st: { title: 'Смещение ST', hit: l => l.stLevel !== 'none', major: l => l.stLevel === 'major', show: l => `${l.lead} ${l.stDiff_mV > 0 ? '+' : ''}${l.stDiff_mV.toFixed(2)} мВ` },
+    st: { title: 'Смещение ST', hit: l => l.stLevel !== 'none', major: l => l.stLevel === 'major', show: l => `${l.lead} ${l.stDiff_mV > 0 ? '+' : l.stDiff_mV < 0 ? '−' : ''}${Math.abs(l.stDiff_mV).toFixed(2).replace('.', ',')} мВ` },
     t: { title: 'Изменение зубца T', hit: l => l.tLevel !== 'none', major: () => true, show: l => l.lead },
   };
   const findings = [];
@@ -233,8 +234,8 @@ export function compareRecords(a, b, { sex, rules = RULES } = {}) {
   ];
   let headline;
   if (!measurements.length && !waveform.available) headline = 'Недостаточно данных для сравнения';
-  else if (!counts.major && !counts.minor) headline = 'Существенных изменений не найдено';
-  else headline = `Найдено изменений: значимых ${counts.major}, заметных ${counts.minor}`;
+  else if (!counts.major && !counts.minor) headline = 'Выраженных и умеренных различий нет';
+  else headline = `Различия между записями: выраженных — ${counts.major}, умеренных — ${counts.minor}`;
   return { older: a, newer: b, days, measurements, waveform, scores: scores.models, concordant: scores.concordant,
     counts, highlights, warnings, headline, rulesVersion: rules.version };
 }

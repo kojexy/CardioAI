@@ -139,10 +139,19 @@ def apply_patch(patch_file, folder):
         target.write_text(text)
 
 
-def weights():
+# Weight files of each network (sources are small and always installed).
+MODEL_WEIGHTS = {'efficientnet': ['efficientnet_deepecg_unscaled.pt'],
+                 'wcr': ['base_ssl.pt', 'wcr_77_classes.pt'],
+                 'ecgfounder': ['12_lead_ECGFounder.pth']}
+
+
+def weights(models=None):
+    wanted = {name for model in (models or MODEL_WEIGHTS) for name in MODEL_WEIGHTS[model]}
     for path in sorted(ASSETS.glob('*.pt*.json')):
         meta = json.loads(path.read_text())
         name = meta.get('file', meta.get('filename'))
+        if name not in wanted:
+            continue
         folder = 'ecgfounder-weights' if name.endswith('.pth') else 'deepecg-weights'
         target = WORK / folder / name
         url = f"https://huggingface.co/{meta['repo']}/resolve/{meta['revision']}/{name}"
@@ -156,11 +165,15 @@ def weights():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sources-only', action='store_true')
+    parser.add_argument('--models', help='comma-separated: ' + ','.join(MODEL_WEIGHTS) + ' (default: all)')
     args = parser.parse_args()
+    models = args.models.split(',') if args.models else None
+    if models and not set(models) <= set(MODEL_WEIGHTS):
+        parser.error('unknown model in --models')
     WORK.mkdir(exist_ok=True)
     sources()
     if not args.sources_only:
-        weights()
+        weights(models)
     print('Setup complete. Upstream code and weights retain their original licenses.')
 
 

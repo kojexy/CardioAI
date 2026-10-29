@@ -65,7 +65,7 @@ test('identical records: no change', () => {
   assert.equal(c.counts.minor, 0);
   assert.ok(c.waveform.available);
   assert.ok(c.waveform.meanCorrelation > 0.98, String(c.waveform.meanCorrelation));
-  assert.match(c.headline, /не найдено/);
+  assert.match(c.headline, /различий нет/);
   assert.equal(c.days, 181);
 });
 

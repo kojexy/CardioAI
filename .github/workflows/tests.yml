@@ -22,3 +22,6 @@ jobs:
       - name: Exchange folder (Python record must match the app's)
         working-directory: outputs/ecg-reader
         run: python test_folder_worker.py
+      - name: Choice of neural networks in the installer (no downloads)
+        working-directory: outputs/ecg-reader
+        run: python test_model_setup.py

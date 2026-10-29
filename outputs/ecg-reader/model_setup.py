@@ -96,11 +96,29 @@ def offloaded_files(folder):
     return found
 
 
-def weight_files():
+# Weight files of each network; same as MODEL_WEIGHTS in scripts/setup_models.py.
+MODEL_WEIGHTS = {'efficientnet': ['efficientnet_deepecg_unscaled.pt'],
+                 'wcr': ['base_ssl.pt', 'wcr_77_classes.pt'],
+                 'ecgfounder': ['12_lead_ECGFounder.pth']}
+
+
+def check_models(models):
+    """The networks to install: a non-empty subset of MODEL_WEIGHTS (None = all)."""
+    if models is None:
+        return list(MODEL_WEIGHTS)
+    if not isinstance(models, list) or not models or not set(models) <= set(MODEL_WEIGHTS):
+        raise ValueError('Выберите хотя бы одну нейросеть из списка')
+    return [m for m in MODEL_WEIGHTS if m in models]
+
+
+def weight_files(models=None):
+    wanted = {name for model in check_models(models) for name in MODEL_WEIGHTS[model]}
     out = []
     for meta_path in sorted((RESOURCES / 'model-assets').glob('*.pt*.json')):
         meta = json.loads(meta_path.read_text(encoding='utf-8'))
         name = meta.get('file', meta.get('filename'))
+        if name not in wanted:
+            continue
         folder = 'ecgfounder-weights' if name.endswith('.pth') else 'deepecg-weights'
         out.append((name, folder, int(meta.get('size_bytes', meta.get('size')))))
     return out
@@ -114,6 +132,7 @@ class ModelSetup:
         self.thread = None
         self.process = None
         self.cancelled = threading.Event()
+        self.selected = list(MODEL_WEIGHTS)
         self.state = dict(running=False, step=None, message='', progress=0.0, error=None, finished=False)
 
     # ----- status
@@ -132,7 +151,8 @@ class ModelSetup:
             state = dict(self.state)
         return dict(state, platform=platform_key(), work_dir=str(work), free_gb=round(free_gb, 1) if free_gb else None,
                     runtime=bool(py), packages=packages, models=models or {}, warnings=warnings,
-                    need_gb=round(self.need_gb(work), 1),
+                    need_gb=round(self.need_gb(work), 1), base_gb=round(self.need_gb(work, []), 1),
+                    model_gb={m: round(self.missing_gb(work, [m]), 2) for m in MODEL_WEIGHTS},
                     supported=platform_key() is not None)
 
     def _set(self, **kw):
@@ -140,7 +160,8 @@ class ModelSetup:
             self.state.update(kw)
 
     # ----- run
-    def start(self):
+    def start(self, models=None):
+        models = check_models(models)
         with self.lock:
             if self.state['running']:
                 raise BlockingIOError('Установка уже идёт')
@@ -148,6 +169,7 @@ class ModelSetup:
                 raise ValueError('Для этого компьютера нет готовой сборки нейросетей (поддерживаются Windows x64, Mac на Apple Silicon, Linux x64)')
             self.state = dict(running=True, step='check', message='Проверка места на диске…', progress=0.0, error=None, finished=False)
             self.cancelled.clear()
+            self.selected = models
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
@@ -168,13 +190,18 @@ class ModelSetup:
         if self.cancelled.is_set():
             raise RuntimeError('Установка отменена. Нажмите кнопку ещё раз, чтобы продолжить.')
 
-    def need_gb(self, work):
-        """Free space still needed: Python + packages if missing, plus weights not yet downloaded."""
-        need = 0.0 if runtime_python(work) and packages_ready(work) else 4.5
-        for name, folder, size in weight_files():
-            path = work / folder / name
-            if not (path.is_file() and path.stat().st_size == size):
-                need += size / 1e9
+    @staticmethod
+    def missing_gb(work, models=None):
+        """Size of the weights of these networks that are not downloaded yet."""
+        return sum(size for name, folder, size in weight_files(models)
+                   if not ((work / folder / name).is_file() and (work / folder / name).stat().st_size == size)) / 1e9
+
+    def need_gb(self, work, models=None):
+        """Free space still needed: Python + packages if missing (about 1.3 GB installed, plus downloads),
+        plus weights not yet downloaded. models=[] gives only the Python part."""
+        need = 0.0 if runtime_python(work) and packages_ready(work) else 2.0
+        if models != []:
+            need += self.missing_gb(work, models)
         return need + 0.5 if need else 0.0
 
     def _run(self):
@@ -183,7 +210,7 @@ class ModelSetup:
             work.mkdir(parents=True, exist_ok=True)
             if offloaded_files(work):
                 raise RuntimeError('Папка моделей находится в iCloud и часть файлов выгружена. Выберите папку вне iCloud.')
-            free, need = shutil.disk_usage(work).free / 1e9, self.need_gb(work)
+            free, need = shutil.disk_usage(work).free / 1e9, self.need_gb(work, self.selected)
             if free < need:
                 raise RuntimeError(f'Недостаточно места: свободно {free:.1f} ГБ, нужно около {need:.1f} ГБ')
             log = (work / 'setup.log').open('a', encoding='utf-8')
@@ -196,7 +223,7 @@ class ModelSetup:
             finally:
                 log.close()
             self._set(running=False, finished=True, step='done', progress=1.0,
-                      message='Нейросети установлены. Пробный расчёт всех трёх моделей на искусственном сигнале прошёл.')
+                      message='Нейросети установлены. Пробный расчёт на искусственном сигнале прошёл.')
         except Exception as exc:  # reported to the user; details are in setup.log
             self._set(running=False, error=str(exc), message='Установка остановлена.')
 
@@ -285,9 +312,10 @@ class ModelSetup:
         marker.write_text(json.dumps({'requirements_sha256': requirements_digest(), 'installed_at': time.time()}))
 
     def _models(self, work, log):
-        self._set(step='models', message='Загрузка исходников и весов моделей (около 2,6 ГБ)…', progress=0.0)
-        files = weight_files()
+        files = weight_files(self.selected)
         total = sum(size for _, _, size in files)
+        size = f'{total / 1e9:.1f}'.replace('.', ',')
+        self._set(step='models', message=f'Загрузка исходников и весов моделей (около {size} ГБ)…', progress=0.0)
 
         def progress():
             done = 0
@@ -296,13 +324,15 @@ class ModelSetup:
                 part = path.with_name(name + '.part')
                 done += path.stat().st_size if path.is_file() else (part.stat().st_size if part.is_file() else 0)
             return min(done / total, 1.0)
-        self._command([str(runtime_python(work)), str(RESOURCES / 'scripts/setup_models.py')], log, 'Модели', progress)
+        self._command([str(runtime_python(work)), str(RESOURCES / 'scripts/setup_models.py'),
+                       '--models', ','.join(self.selected)], log, 'Модели', progress)
 
     def _self_test(self, work, log):
         py = str(runtime_python(work))
         tests = [('efficientnet', 'DeepECG SL', [py, str(APP / 'deepecg_run_local.py'), '--model', 'efficientnet'], 77),
                  ('wcr', 'DeepECG SSL', [py, str(APP / 'deepecg_run_local.py'), '--model', 'wcr'], 77),
                  ('ecgfounder', 'ECGFounder', [py, str(APP / 'ecgfounder_run_local.py')], 150)]
+        tests = [t for t in tests if t[0] in self.selected]
         for i, (key, name, command, expected) in enumerate(tests):
             self._set(step='test', message=f'Пробный расчёт {name} на искусственном сигнале…', progress=i / len(tests))
             report = work / 'selftest' / f'{key}.json'
