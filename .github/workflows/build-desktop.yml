@@ -1,0 +1,45 @@
+name: Desktop app (Windows, macOS)
+on:
+  push:
+    branches: [main, 'feature/**']
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: CardioAI-Windows
+          - os: macos-latest
+            name: CardioAI-macOS-AppleSilicon
+          - os: macos-13
+            name: CardioAI-macOS-Intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tools
+        run: python -m pip install -r desktop/requirements-desktop.txt
+      - name: Build
+        run: pyinstaller --noconfirm desktop/cardioai.spec
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/CardioAI.app ${{ matrix.name }}.zip
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/CardioAI -DestinationPath ${{ matrix.name }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.zip
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.name }}.zip

@@ -16,3 +16,10 @@ __pycache__/
 *.zip
 *.log
 .venv/
+node_modules/
+android/
+desktop/build/
+desktop/dist/
+build/
+dist/
+work

@@ -19,9 +19,30 @@ import urllib.request
 import webbrowser
 
 from ecg_reader import LEADS
+from patient_store import PatientStore
 
-APP = Path(__file__).resolve().parent
+# In a packaged desktop build the module sits at the bundle root; resources keep repo layout.
+APP = (Path(sys._MEIPASS) / 'outputs/ecg-reader' if getattr(sys, 'frozen', False)
+       else Path(__file__).resolve().parent)
+# Shared web app (patients, comparison). Inside a packaged desktop build it sits in the bundle.
+WEB_APP = Path(getattr(sys, '_MEIPASS', APP.parents[1])) / 'app'
 MAX_BODY = 2 * 1024 * 1024
+STATIC_TYPES = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+                '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+                '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json'}
+
+
+def code_home():
+    """Folder with the CardioAI source checkout and work/ (models, venv)."""
+    return Path(os.environ.get('CARDIOAI_HOME') or APP.parents[1])
+
+
+def model_python():
+    home = code_home()
+    for candidate in (home / 'work/deepecg-venv/bin/python', home / 'work/deepecg-venv/Scripts/python.exe'):
+        if candidate.is_file():
+            return str(candidate)
+    return None if getattr(sys, 'frozen', False) else sys.executable
 
 
 def strict_json(data):
@@ -63,6 +84,7 @@ class LocalServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, port=8766, runs=None):
+        runs = runs or os.environ.get('CARDIOAI_DATA')
         self.lock = threading.RLock()
         self.children = set()
         self.stopping = False
@@ -70,6 +92,7 @@ class LocalServer(ThreadingHTTPServer):
         self.token = secrets.token_hex(32)
         self.runs = Path(runs) if runs else APP / 'local-runs'
         self.runs.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.store = PatientStore(self.runs / 'cardioai-store')
         self.jobs = {}
         self.slot = threading.BoundedSemaphore(1)
         for entry in sorted(self.runs.glob('*/job.json')):
@@ -102,15 +125,18 @@ class LocalServer(ThreadingHTTPServer):
         super().server_close()
 
     def models(self):
-        weights = APP.parents[1] / 'work/deepecg-weights'
+        home = code_home()
+        if model_python() is None:
+            return {'efficientnet': False, 'wcr': False, 'ecgfounder': False}
+        weights = home / 'work/deepecg-weights'
         names = {'efficientnet': ['efficientnet_deepecg_unscaled.pt'],
                  'wcr': ['base_ssl.pt', 'wcr_77_classes.pt']}
         found = {key: all((weights / name).is_file() and
                          (weights / (name + '.json')).is_file() for name in files)
                 for key, files in names.items()}
-        founder = APP.parents[1] / 'work/ecgfounder-weights/12_lead_ECGFounder.pth'
+        founder = home / 'work/ecgfounder-weights/12_lead_ECGFounder.pth'
         found['ecgfounder'] = (founder.is_file() and founder.with_suffix('.pth.json').is_file()
-                               and (APP / 'ecgfounder-source-manifest.json').is_file())
+                               and (home / 'outputs/ecg-reader/ecgfounder-source-manifest.json').is_file())
         return found
 
     def start_job(self, data):
@@ -159,9 +185,13 @@ class LocalServer(ThreadingHTTPServer):
     def worker(self, job_id, folder, mode, model):
         process = None
         try:
-            command = ([sys.executable, str(APP / 'ecgfounder_run_local.py')]
+            scripts = code_home() / 'outputs/ecg-reader'
+            python = model_python()
+            if python is None:
+                raise RuntimeError('Не найдено окружение моделей (work/deepecg-venv)')
+            command = ([python, str(scripts / 'ecgfounder_run_local.py')]
                        if model == 'ecgfounder' else
-                       [sys.executable, str(APP / 'deepecg_run_local.py'), '--model', model])
+                       [python, str(scripts / 'deepecg_run_local.py'), '--model', model])
             command += ['--report', str(folder / 'result.json')]
             command += ['--smoke-test'] if mode == 'self_test' else ['--input-dir', str(folder)]
             with (folder / 'run.log').open('w') as log:
@@ -220,18 +250,54 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def redirect(self, location):
+        self.send_response(302)
+        self.send_header('Location', location)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def static_app(self, relative):
+        relative = relative.split('?', 1)[0] or 'index.html'
+        root = WEB_APP.resolve()
+        target = (root / relative).resolve()
+        if root not in target.parents or not target.is_file() or target.suffix not in STATIC_TYPES:
+            return self.answer(404, {'error': 'Не найдено'})
+        if target == root / 'index.html':
+            html = target.read_text(encoding='utf-8').replace('__TOKEN__', self.server.token)
+            return self.respond(200, html, STATIC_TYPES['.html'])
+        return self.respond(200, target.read_bytes(), STATIC_TYPES[target.suffix])
+
     def answer(self, status, value):
         self.respond(status, json.dumps(value, ensure_ascii=False, allow_nan=False))
 
     def do_GET(self):
+        try:
+            self.get()
+        except OSError:
+            self.answer(404, {'error': 'Файл недоступен в этой установке'})
+
+    def get(self):
         if not self.allowed_host():
             return self.answer(403, {'error': 'Недопустимый адрес сервера'})
         if self.path == '/':
             html = (APP / 'DeepECG-local.html').read_text().replace('__TOKEN__', self.server.token)
             return self.respond(200, html, 'text/html; charset=utf-8')
         if self.path == '/api/status':
-            return self.answer(200, dict(app='ECG301-DeepECG-local', version=3,
-                                        models=self.server.models(), local_only=True))
+            return self.answer(200, dict(app='ECG301-DeepECG-local', version=4,
+                                        models=self.server.models(), local_only=True,
+                                        storage=True, data_dir=str(self.server.store.root)))
+        if self.path == '/app':
+            return self.redirect('/app/')
+        if self.path.startswith('/app/'):
+            return self.static_app(self.path[len('/app/'):])
+        if self.path == '/api/store/patients':
+            return self.answer(200, self.server.store.list_patients())
+        store_parts = self.path.strip('/').split('/')
+        if len(store_parts) == 5 and store_parts[:3] == ['api', 'store', 'patients'] and store_parts[4] == 'records':
+            try:
+                return self.answer(200, self.server.store.list_records(store_parts[3]))
+            except ValueError as exc:
+                return self.answer(400, {'error': str(exc)})
         if self.path in ('/api/founder-report','/founder/results.json','/founder/scores.csv',
                          '/founder/comparison.md','/founder/pm-original.pdf'):
             try:
@@ -325,9 +391,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.answer(200, report)
             if self.path == '/api/run':
                 return self.answer(202, self.server.start_job(data))
+            if self.path == '/api/store/patient':
+                return self.answer(200, self.server.store.save_patient(data))
+            if self.path == '/api/store/record':
+                return self.answer(200, self.server.store.save_record(data))
+            if self.path == '/api/store/delete':
+                return self.answer(200, self.server.store.delete(data.get('kind'), data.get('id')))
             return self.answer(404, {'error': 'Не найдено'})
         except BlockingIOError as exc:
             self.answer(409, {'error': str(exc)})
+        except ImportError:
+            self.answer(400, {'error': 'Эта функция требует полной установки CardioAI с Python и моделями (см. README)'})
         except (ValueError, TypeError, KeyError, UnicodeError, OSError) as exc:
             self.answer(400, {'error': str(exc)})
 
@@ -336,6 +410,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=8766)
     parser.add_argument('--open', action='store_true')
+    parser.add_argument('--legacy', action='store_true', help='open the old model page instead of the patient app')
     args = parser.parse_args()
     try:
         server = LocalServer(args.port)
@@ -346,7 +421,7 @@ def main():
                 with urllib.request.urlopen(url + 'api/status', timeout=2) as response:
                     status = strict_json(response.read())
                 if status.get('app') == 'ECG301-DeepECG-local':
-                    webbrowser.open(url)
+                    webbrowser.open(url if args.legacy else url + 'app/')
                     return
             except (OSError, ValueError):
                 pass
@@ -354,7 +429,7 @@ def main():
     url = f'http://127.0.0.1:{server.server_address[1]}/'
     print('ECG301 / DeepECG: ' + url, flush=True)
     if args.open:
-        webbrowser.open(url)
+        webbrowser.open(url if args.legacy else url + 'app/')
     try:
         server.serve_forever()
     except KeyboardInterrupt:

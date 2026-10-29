@@ -1,0 +1,21 @@
+{
+  "name": "cardioai",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CardioAI: patients, ECG history and serial comparison (web, desktop, Android)",
+  "scripts": {
+    "test": "node --test tests/js/*.test.mjs",
+    "serve": "python3 -m http.server 8080 --directory app",
+    "android:sync": "npx cap sync android",
+    "android:build": "npx cap sync android && node scripts/android-icons.mjs && cd android && ./gradlew assembleDebug",
+    "android:icons": "node scripts/android-icons.mjs"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/cli": "^8.6.0",
+    "@capacitor/core": "^8.6.0",
+    "@capacitor/filesystem": "^8.1.5",
+    "@capacitor/share": "^8.0.3"
+  }
+}
