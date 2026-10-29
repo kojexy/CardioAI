@@ -124,7 +124,7 @@ class LocalServerTest(unittest.TestCase):
             restored.server_close()
         with patch('sys.argv',['server','--port',str(self.server.server_address[1]),'--open']), patch('webbrowser.open') as opened:
             main()
-            opened.assert_called_once_with(self.base+'/')
+            opened.assert_called_once_with(self.base+'/app/')
 
 
 class LifecycleTest(unittest.TestCase):

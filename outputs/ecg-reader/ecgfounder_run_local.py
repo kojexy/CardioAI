@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import platform
 
@@ -13,8 +14,9 @@ import torch
 
 APP = Path(__file__).resolve().parent
 ROOT = APP.parents[1]
-UPSTREAM = ROOT / 'work/ECGFounder'
-WEIGHTS = ROOT / 'work/ecgfounder-weights/12_lead_ECGFounder.pth'
+WORK = Path(os.environ.get('CARDIOAI_WORK') or ROOT / 'work')
+UPSTREAM = WORK / 'ECGFounder'
+WEIGHTS = WORK / 'ecgfounder-weights/12_lead_ECGFounder.pth'
 MANIFEST = APP / 'ecgfounder-source-manifest.json'
 
 

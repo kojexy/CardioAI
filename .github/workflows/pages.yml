@@ -1,0 +1,23 @@
+# Website version (static app/ folder). GitHub Pages for a private repository needs a paid plan;
+# the same folder can be hosted on any static host (Netlify, Cloudflare Pages, own server with HTTPS).
+name: Website (GitHub Pages)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: app
+      - id: deployment
+        uses: actions/deploy-pages@v4

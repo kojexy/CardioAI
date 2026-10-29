@@ -3,16 +3,18 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
-import subprocess
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / 'model-assets'
-WORK = ROOT / 'work'
+WORK = Path(os.environ.get('CARDIOAI_WORK') or ROOT / 'work')
 
 
 def sha256(path):
@@ -23,17 +25,37 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def download(url, target, expected):
-    if target.is_file() and sha256(target) == expected:
-        print('Verified:', target.name, flush=True)
-        return
-    if target.exists():
-        raise ValueError('Existing asset has an unexpected checksum: ' + str(target))
+def download(url, target, expected, attempts=4):
+    """Download with resume (.part + HTTP Range) and retries; keep the file only if SHA256 matches."""
+    if target.is_file():
+        if sha256(target) == expected:
+            print('Verified:', target.name, flush=True)
+            return
+        # A damaged earlier download: keep it aside for inspection and fetch again.
+        target.replace(target.with_name(target.name + '.bad'))
+        print('Checksum mismatch, downloading again:', target.name, flush=True)
     target.parent.mkdir(parents=True, exist_ok=True)
     part = target.with_name(target.name + '.part')
     print('Downloading:', url, flush=True)
-    with urllib.request.urlopen(url, timeout=120) as response, part.open('wb') as out:
-        shutil.copyfileobj(response, out, 1024 * 1024)
+    for attempt in range(1, attempts + 1):
+        done = part.stat().st_size if part.is_file() else 0
+        request = urllib.request.Request(url, headers={'Range': f'bytes={done}-'} if done else {})
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                resumed = done and response.status == 206
+                with part.open('ab' if resumed else 'wb') as out:
+                    shutil.copyfileobj(response, out, 1024 * 1024)
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416:  # nothing left to fetch: the .part is complete (or wrong; the hash decides)
+                break
+            if attempt == attempts:
+                raise
+        except OSError:
+            if attempt == attempts:
+                raise
+        print(f'Connection lost, retry {attempt} of {attempts - 1}:', target.name, flush=True)
+        time.sleep(5 * attempt)
     if sha256(part) != expected:
         part.unlink()
         raise ValueError('Downloaded asset SHA256 mismatch: ' + target.name)
@@ -68,15 +90,68 @@ def sources():
                     out.parent.mkdir(parents=True, exist_ok=True)
                     out.write_bytes(tar.extractfile(member).read())
             if source['folder'] == 'fairseq-signals':
-                subprocess.run(['patch', '--batch', '-p1', '-i', str(ROOT / 'outputs/ecg-reader/fairseq-python312-compat.patch')], cwd=staging, check=True)
+                apply_patch(ROOT / 'outputs/ecg-reader/fairseq-python312-compat.patch', staging)
             (staging / marker.name).write_text(json.dumps(source, indent=2))
             staging.replace(target)
 
 
-def weights():
+def apply_patch(patch_file, folder):
+    """Apply a unified diff (-p1) in pure Python, so no `patch` tool is needed (Windows).
+    Every context and removed line must match exactly; otherwise nothing is written."""
+    lines = patch_file.read_text().splitlines()
+    changes, i = {}, 0
+    while i < len(lines):
+        if lines[i].startswith('+++ '):
+            name = lines[i][4:].split('\t')[0]
+            name = name[2:] if name.startswith('b/') else name
+            hunks = changes.setdefault(name, [])
+            i += 1
+            while i < len(lines) and lines[i].startswith('@@'):
+                start = int(lines[i].split()[1].split(',')[0][1:])
+                old, new = [], []
+                i += 1
+                while i < len(lines) and not lines[i].startswith(('@@', 'diff ', '--- ')):
+                    tag, text = lines[i][:1], lines[i][1:]
+                    if tag in (' ', ''):
+                        old.append(text); new.append(text)
+                    elif tag == '-':
+                        old.append(text)
+                    elif tag == '+':
+                        new.append(text)
+                    i += 1
+                hunks.append((start, old, new))
+            continue
+        i += 1
+    results = {}
+    for name, hunks in changes.items():
+        target = folder / name
+        text = target.read_text()
+        source = text.splitlines()
+        offset = 0
+        for start, old, new in hunks:
+            at = start - 1 + offset
+            if source[at:at + len(old)] != old:
+                raise ValueError(f'Patch does not match {name} near line {start}')
+            source[at:at + len(old)] = new
+            offset += len(new) - len(old)
+        results[target] = '\n'.join(source) + ('\n' if text.endswith('\n') else '')
+    for target, text in results.items():
+        target.write_text(text)
+
+
+# Weight files of each network (sources are small and always installed).
+MODEL_WEIGHTS = {'efficientnet': ['efficientnet_deepecg_unscaled.pt'],
+                 'wcr': ['base_ssl.pt', 'wcr_77_classes.pt'],
+                 'ecgfounder': ['12_lead_ECGFounder.pth']}
+
+
+def weights(models=None):
+    wanted = {name for model in (models or MODEL_WEIGHTS) for name in MODEL_WEIGHTS[model]}
     for path in sorted(ASSETS.glob('*.pt*.json')):
         meta = json.loads(path.read_text())
         name = meta.get('file', meta.get('filename'))
+        if name not in wanted:
+            continue
         folder = 'ecgfounder-weights' if name.endswith('.pth') else 'deepecg-weights'
         target = WORK / folder / name
         url = f"https://huggingface.co/{meta['repo']}/resolve/{meta['revision']}/{name}"
@@ -90,11 +165,15 @@ def weights():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sources-only', action='store_true')
+    parser.add_argument('--models', help='comma-separated: ' + ','.join(MODEL_WEIGHTS) + ' (default: all)')
     args = parser.parse_args()
+    models = args.models.split(',') if args.models else None
+    if models and not set(models) <= set(MODEL_WEIGHTS):
+        parser.error('unknown model in --models')
     WORK.mkdir(exist_ok=True)
     sources()
     if not args.sources_only:
-        weights()
+        weights(models)
     print('Setup complete. Upstream code and weights retain their original licenses.')
 
 

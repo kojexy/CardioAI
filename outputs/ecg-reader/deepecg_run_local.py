@@ -12,9 +12,12 @@ import numpy as np
 import pandas as pd
 import torch
 
+import os
 ROOT = Path(__file__).resolve().parents[2]
-UPSTREAM = ROOT / 'work/DeepECG_Docker'
-WEIGHT_DIR = ROOT / 'work/deepecg-weights'
+# Models, sources and runtime: <repo>/work, or CARDIOAI_WORK for the desktop program.
+WORK = Path(os.environ.get('CARDIOAI_WORK') or ROOT / 'work')
+UPSTREAM = WORK / 'DeepECG_Docker'
+WEIGHT_DIR = WORK / 'deepecg-weights'
 
 
 def verified_weight(name):
@@ -35,6 +38,18 @@ def constant(name):
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             return ast.literal_eval(node.value)
     raise ValueError(f'Upstream constant missing: {name}')
+
+
+def thresholds(architecture, labels):
+    """Authors' per-label operating points (sensitivity/specificity balance) from the pinned upstream."""
+    key = 'SL_sens_spec_threshold' if architecture == 'efficientnet' else 'SSL_sens_spec_threshold'
+    table = json.loads((UPSTREAM / 'thresholds/77_tasks_final.json').read_text())
+    out = {}
+    for label in labels:
+        value = table.get(label, {}).get(key)
+        if isinstance(value, (int, float)) and np.isfinite(value) and 0 < value < 1:
+            out[label] = float(value)
+    return out
 
 
 def infer(signal, architecture='efficientnet'):
@@ -62,7 +77,7 @@ def infer(signal, architecture='efficientnet'):
     else:
         path, manifest = verified_weight('wcr_77_classes.pt')
         base, base_manifest = verified_weight('base_ssl.pt')
-        sys.path.insert(0, str(ROOT / 'work/fairseq-signals'))
+        sys.path.insert(0, str(WORK / 'fairseq-signals'))
         from fairseq_signals.utils import checkpoint_utils
         model, _, _ = checkpoint_utils.load_model_and_task(
             str(path), arg_overrides={'model_path':str(base)}, suffix='')
@@ -86,6 +101,8 @@ def infer(signal, architecture='efficientnet'):
                 runtime=runtime,
                 upstream_revision='cabf6c06b74731c86b8c5a27ae7101f14db5ec38',
                 scores={label:float(value) for label,value in zip(labels,scores[0])},
+                thresholds=thresholds(architecture, labels),
+                threshold_source='DeepECG_Docker thresholds/77_tasks_final.json (' + ('SL' if architecture == 'efficientnet' else 'SSL') + '_sens_spec_threshold)',
                 diagnosis_assigned=False,
                 note='Raw model scores, not calibrated individual disease probabilities; clinical validation not established')
 
