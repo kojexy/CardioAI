@@ -6,7 +6,7 @@ Date: 2026-10-29. Branch `feature/patients-compare-apps`. Upstream pins: DeepECG
 
 I read every Python file in `outputs/ecg-reader/` and `scripts/`, the JS comparison engine in `app/js/`, and the pinned upstream code. That covers `utils/ecg_signal_processor.py`, `utils/constants.py`, `utils/files_handler.py`, `utils/analysis_pipeline.py`, both model wrappers and `thresholds/*.json` in DeepECG_Docker, plus `ptbxl_eval.py`, `dataset.py` and `util.py` in ECGFounder.
 
-I did **not** run the models. `work/` is a symlink into iCloud-synced `~/Documents` and Python imports hung there (see H5). Instead I reproduced the upstream scaling and normalisation formulas in plain NumPy on a synthetic 12-lead ECG (script: `/private/tmp/claude-501/cardio-review/exp2.py`). The numbers quoted below are from that script.
+I did **not** run the models. `work/` is a symlink into iCloud-synced `~/Documents` and Python imports hung there (see H5). Instead I reproduced the upstream scaling and normalisation formulas in plain NumPy on a synthetic 12-lead ECG (temporary script, not kept in the repo). The numbers quoted below are from that script.
 
 **Short verdict:** the plumbing matches upstream line by line:
 
@@ -73,7 +73,7 @@ The weak points are elsewhere: how the scores are **interpreted and presented**,
 - **Evidence:**
   - Upstream `utils/ecg_signal_processor.py:46-53` (lead index 0 only; DC bin included in the mean).
   - `utils/constants.py:514`.
-  - Experiment output in `/private/tmp/claude-501/cardio-review/exp2.py`.
+  - Experiment run with a temporary NumPy script (not kept in the repo).
 - **Fix:**
   - Because our input is already calibrated mV, replace the per-record factor with a **fixed reference factor**: `PTBXL_POWER_RATIO / m_ref`, where `m_ref` is the mean lead-I |FFT| of PTB-XL at 250 Hz and 2500 samples.
     - Compute it once on PTB-XL (CC-BY 4.0; HeartWise also hosts `heartwise/PTB-XL_lite`) and pin it in `model-assets`.
@@ -149,7 +149,7 @@ The weak points are elsewhere: how the scores are **interpreted and presented**,
   - Agreement within about 2% in both checks is far stronger evidence than photo fitting. Record it as `verification_evidence`.
 
 ### H5. Model install inside an iCloud-synced folder hangs inference
-- **Finding:** `work/` → `/Users/ga/Documents/Codex/…/work` (iCloud Desktop & Documents). Many files there are "dataless" (offloaded):
+- **Finding:** `work/` → a folder inside `~/Documents` (iCloud Desktop & Documents). Many files there are "dataless" (offloaded):
   - `cat` of upstream source files took 60–300 s or more;
   - Python imports of numpy/torch from `work/deepecg-venv` hung at 0% CPU;
   - every run also SHA256-hashes about 2.2 GB of weights (`deepecg_run_local.py:20-29`), which forces a full download.
