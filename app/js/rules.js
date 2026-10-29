@@ -12,7 +12,7 @@ export const RULES = {
       ref: 'Philips: ΔЧСС ≥20 = значимо; шум ~5,8 (Zywietz 2003)',
       crossings: [{ below: 50, level: 'minor', text: 'брадикардия (<50)' }, { above: 100, level: 'minor', text: 'тахикардия (>100)' }],
       relative: [{ pct: -25, below: 50, level: 'major' }, { pct: 25, above: 100, level: 'major' }] },
-    { key: 'PR_ms', label: 'PR', unit: 'мс', normal: [120, 200], noise: 10, minor: 20, major: 40, basis: 'practical',
+    { key: 'PR_ms', label: 'PQ', unit: 'мс', normal: [120, 200], noise: 10, minor: 20, major: 40, basis: 'practical',
       ref: 'норма AHA; правило 25% (TQT)',
       crossings: [{ above: 200, level: 'minor', text: 'PQ >200 мс (как при АВ-блокаде I ст.)' }, { below: 120, level: 'minor', text: 'короткий PQ (<120 мс)' }],
       relative: [{ pct: 25, above: 200, level: 'major' }] },

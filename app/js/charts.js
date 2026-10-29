@@ -61,14 +61,14 @@ export function beatOverlay(waveform, leadNames) {
     const info = waveform.leads[j];
     svg.append(el('rect', { x: ox + 2, y: oy + 2, width: cw - 4, height: ch - 4, rx: 6, class: 'overlay-cell ' + (info?.level || '') }));
     svg.append(el('text', { x: ox + 10, y: oy + 18, class: 'overlay-lead' }, name));
-    if (info) svg.append(el('text', { x: ox + cw - 10, y: oy + 18, class: 'overlay-corr', 'text-anchor': 'end' }, 'r=' + info.correlation.toFixed(2)));
+    if (info) svg.append(el('text', { x: ox + cw - 10, y: oy + 18, class: 'overlay-corr', 'text-anchor': 'end' }, 'сходство ' + info.correlation.toFixed(2).replace('.', ',')));
     const mid = oy + ch / 2 + 8, scale = (ch / 2 - 18) / max;
     svg.append(el('line', { x1: ox + 8, x2: ox + cw - 8, y1: mid, y2: mid, class: 'chart-grid' }));
     const path = (t, shift) => t[j].map((v, i) => `${ox + 8 + (cw - 16) * (i + shift) / (t[j].length - 1)},${mid - v * scale}`).join(' ');
     svg.append(el('polyline', { points: path(a, 0), class: 'beat-a' }));
     svg.append(el('polyline', { points: path(b, -lag), class: 'beat-b' }));
   });
-  svg.append(el('text', { x: 8, y: H - 6, class: 'chart-axis' }, 'Синий — более ранняя запись, оранжевый — более поздняя. Масштаб по прибору не подтверждён.'));
+  svg.append(el('text', { x: 8, y: H - 6, class: 'chart-axis' }, 'Синий — раньше, оранжевый — сейчас. Если форма не изменилась, линии сливаются в одну.'));
   return svg;
 }
 

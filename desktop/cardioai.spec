@@ -34,4 +34,5 @@ coll = COLLECT(exe, a.binaries, a.datas, name='CardioAI')
 if sys.platform == 'darwin':
     app = BUNDLE(coll, name='CardioAI.app', icon=icon if Path(icon).is_file() else None,
                  bundle_identifier='io.github.kojexy.cardioai',
-                 info_plist={'NSHighResolutionCapable': True, 'CFBundleShortVersionString': '2.0.0'})
+                 info_plist={'NSHighResolutionCapable': True, 'CFBundleShortVersionString': '2.2.0',
+                             'CFBundleDevelopmentRegion': 'ru', 'CFBundleLocalizations': ['ru']})
