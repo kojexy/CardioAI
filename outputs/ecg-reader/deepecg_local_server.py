@@ -37,6 +37,22 @@ def code_home():
     return Path(os.environ.get('CARDIOAI_HOME') or APP.parents[1])
 
 
+def upstream_thresholds():
+    """Per-label DeepECG operating points from the installed upstream (not redistributed here)."""
+    path = code_home() / 'work/DeepECG_Docker/thresholds/77_tasks_final.json'
+    try:
+        table = strict_json(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    out = {'efficientnet': {}, 'wcr': {}}
+    for label, row in table.items():
+        for model, key in (('efficientnet', 'SL_sens_spec_threshold'), ('wcr', 'SSL_sens_spec_threshold')):
+            value = row.get(key) if isinstance(row, dict) else None
+            if isinstance(value, (int, float)) and 0 < value < 1:
+                out[model][label] = float(value)
+    return out
+
+
 def model_python():
     home = code_home()
     for candidate in (home / 'work/deepecg-venv/bin/python', home / 'work/deepecg-venv/Scripts/python.exe'):
@@ -286,6 +302,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.answer(200, dict(app='ECG301-DeepECG-local', version=4,
                                         models=self.server.models(), local_only=True,
                                         storage=True, data_dir=str(self.server.store.root)))
+        if self.path == '/api/thresholds':
+            return self.answer(200, upstream_thresholds())
         if self.path == '/app':
             return self.redirect('/app/')
         if self.path.startswith('/app/'):

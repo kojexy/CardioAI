@@ -37,6 +37,18 @@ def constant(name):
     raise ValueError(f'Upstream constant missing: {name}')
 
 
+def thresholds(architecture, labels):
+    """Authors' per-label operating points (sensitivity/specificity balance) from the pinned upstream."""
+    key = 'SL_sens_spec_threshold' if architecture == 'efficientnet' else 'SSL_sens_spec_threshold'
+    table = json.loads((UPSTREAM / 'thresholds/77_tasks_final.json').read_text())
+    out = {}
+    for label in labels:
+        value = table.get(label, {}).get(key)
+        if isinstance(value, (int, float)) and np.isfinite(value) and 0 < value < 1:
+            out[label] = float(value)
+    return out
+
+
 def infer(signal, architecture='efficientnet'):
     if (not isinstance(signal, np.ndarray) or signal.shape != (2500, 12)
             or signal.dtype.kind not in 'fiu' or not np.isfinite(signal).all()):
@@ -86,6 +98,8 @@ def infer(signal, architecture='efficientnet'):
                 runtime=runtime,
                 upstream_revision='cabf6c06b74731c86b8c5a27ae7101f14db5ec38',
                 scores={label:float(value) for label,value in zip(labels,scores[0])},
+                thresholds=thresholds(architecture, labels),
+                threshold_source='DeepECG_Docker thresholds/77_tasks_final.json (' + ('SL' if architecture == 'efficientnet' else 'SSL') + '_sens_spec_threshold)',
                 diagnosis_assigned=False,
                 note='Raw model scores, not calibrated individual disease probabilities; clinical validation not established')
 

@@ -163,8 +163,11 @@ export function compareScores(a, b, rules = RULES) {
     for (const [label, va] of Object.entries(ra.scores)) {
       const vb = rb.scores[label];
       if (!Number.isFinite(va) || !Number.isFinite(vb)) continue;
-      const t = ra.thresholds?.[label] ?? s.threshold, hy = s.hysteresis;
-      const crossed = (va < t - hy && vb > t + hy) || (va > t + hy && vb < t - hy);
+      // Threshold crossing only with the authors' per-label operating point (no generic 0.5),
+      // judged in logit space so tiny thresholds like 0.004 work; margin on both sides ≥ hysteresis.
+      const t = ra.thresholds?.[label] ?? rb.thresholds?.[label] ?? null;
+      const ma = t === null ? 0 : logit(va) - logit(t), mb = t === null ? 0 : logit(vb) - logit(t);
+      const crossed = t !== null && Math.sign(ma) !== Math.sign(mb) && Math.abs(ma) >= s.hysteresisLogit && Math.abs(mb) >= s.hysteresisLogit;
       let level = scoreLevel(va, vb, s);
       // Overlapping uncertainty bands (e.g. 180/200/220 Hz runs) cap the level.
       const ba = ra.ranges?.[label], bb = rb.ranges?.[label];
@@ -177,15 +180,16 @@ export function compareScores(a, b, rules = RULES) {
     out.push({ model, modelName: ra.model || model, changes: changes.slice(0, s.top), all: changes, total: changes.length,
       synthetic: !!(ra.synthetic || rb.synthetic), sameWeights: !ra.weightsSha || ra.weightsSha === rb.weightsSha });
   }
-  // Agreement: a label group counts in the summary only if ≥2 models move the same way.
+  // Agreement per label (same concept), not per group: ≥2 models move the same label the same way.
+  // ECGFounder uses other label names and therefore never votes here (no concept map yet).
   const votes = {};
-  for (const m of out) for (const c of m.all) if (c.group) {
-    const key = c.group + (c.delta > 0 ? '↑' : '↓');
+  for (const m of out) for (const c of m.all) {
+    const key = c.label + (c.delta > 0 ? '\u2191' : '\u2193');
     (votes[key] ||= new Set()).add(m.model);
   }
   const concordant = Object.entries(votes).filter(([, set]) => set.size >= 2)
-    .map(([key]) => ({ group: key.slice(0, -1), direction: key.endsWith('↑') ? 'up' : 'down' }));
-  for (const m of out) for (const c of m.all) c.concordant = concordant.some(g => g.group === c.group && (c.delta > 0) === (g.direction === 'up'));
+    .map(([key]) => ({ label: key.slice(0, -1), group: LABEL_GROUP_OF[key.slice(0, -1)] || null, direction: key.endsWith('\u2191') ? 'up' : 'down' }));
+  for (const m of out) for (const c of m.all) c.concordant = concordant.some(g => g.label === c.label && (c.delta > 0) === (g.direction === 'up'));
   return { models: out, concordant };
 }
 

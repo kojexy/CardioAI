@@ -8,7 +8,7 @@ import { trendChart, beatOverlay, stripChart } from './charts.js';
 import { toMillivolts } from './signal.js';
 import { saveFile, readFile } from './files.js';
 
-const state = { store: null, status: null, labelsRu: {} };
+const state = { store: null, status: null, labelsRu: {}, thresholds: {} };
 const view = document.getElementById('view');
 
 // ---------- small DOM helpers (textContent only; never innerHTML with user data)
@@ -48,6 +48,10 @@ function val(v, unit) {
   if (!Number.isFinite(v)) return '—';
   return (Number.isInteger(v) ? v : Math.round(v * 100) / 100) + (unit === '°' ? '°' : unit ? ' ' + unit : '');
 }
+function logitMargin(p, t) {
+  const lg = x => { const q = Math.min(0.999, Math.max(0.001, x)); return Math.log(q / (1 - q)); };
+  return lg(p) - lg(t);
+}
 function labelRu(label) { return state.labelsRu[label] ? `${state.labelsRu[label]} (${label})` : label; }
 async function confirmAction(text) { return window.confirm(text); }
 function sortByDate(records) { return [...records].sort((a, b) => (b.recordedAt || '').localeCompare(a.recordedAt || '')); }
@@ -70,7 +74,9 @@ function aiEntry(report, extra = {}) {
   if (!report || typeof report.scores !== 'object') throw Error('В файле нет оценок модели (поле scores)');
   const key = MODEL_KEYS[report.model] || String(report.model || 'model');
   const weightsSha = report.weights?.sha256 || report.weights?.finetuned?.sha256 || null;
-  return [key, { model: MODEL_NAMES[key] || report.model, scores: report.scores, thresholds: report.thresholds, ranges: report.ranges, weightsSha,
+  // Older reports have no thresholds: on the desktop take them from the installed upstream.
+  const thresholds = report.thresholds || (Object.keys(state.thresholds[key] || {}).length ? state.thresholds[key] : null);
+  return [key, { model: MODEL_NAMES[key] || report.model, scores: report.scores, thresholds, thresholdSource: report.threshold_source || (thresholds ? 'DeepECG_Docker 77_tasks_final.json' : null), ranges: report.ranges, weightsSha,
     synthetic: report.synthetic_test === true, attachedAt: new Date().toISOString(), ...extra }];
 }
 
@@ -324,10 +330,19 @@ function aiCard(patient, record) {
   const entries = Object.entries(record.ai || {});
   if (!entries.length) box.append(h('p', { class: 'muted' }, 'К этой ЭКГ пока не прикреплены результаты моделей.'));
   for (const [key, entry] of entries) {
-    const top = Object.entries(entry.scores).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    const t = entry.thresholds || null;
+    // With the authors' operating points: show labels above them, ordered by margin (logit).
+    const ranked = t
+      ? Object.entries(entry.scores).filter(([l]) => t[l]).map(([l, v]) => [l, v, logitMargin(v, t[l])]).sort((a, b) => b[2] - a[2])
+      : Object.entries(entry.scores).sort((a, b) => b[1] - a[1]).map(([l, v]) => [l, v, null]);
+    const above = t ? ranked.filter(r => r[2] > 0) : ranked.slice(0, 10);
     box.append(h('h3', {}, entry.model || key),
       entry.synthetic ? notice('Это технический тест на искусственном сигнале, а не оценка этой ЭКГ.') : null,
-      h('table', {}, h('tbody', {}, top.map(([label, v]) => h('tr', {}, h('td', {}, labelRu(label)), h('td', { class: 'num' }, v.toFixed(3)))))),
+      t ? h('p', { class: 'muted' }, `Выше рабочего порога авторов модели: ${above.length} из ${ranked.length}. Порог — баланс чувствительности и специфичности на данных авторов, не на ECG301.`)
+        : notice('Для этой модели нет опубликованных порогов: сырые оценки 0–1 нельзя читать как «есть/нет».'),
+      above.length ? h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Метка'), h('th', { class: 'num' }, 'Оценка'), t ? h('th', { class: 'num' }, 'Порог') : null, t ? h('th', { class: 'num' }, 'Запас (логит)') : null)),
+        h('tbody', {}, above.slice(0, 15).map(([label, v, m]) => h('tr', {}, h('td', {}, labelRu(label)), h('td', { class: 'num' }, v.toFixed(3)),
+          t ? h('td', { class: 'num' }, String(t[label])) : null, t ? h('td', { class: 'num' }, (m > 0 ? '+' : '') + m.toFixed(1)) : null)))) : h('p', {}, 'Ни одна метка не превышает порог.'),
       h('details', {}, h('summary', {}, `Все оценки (${Object.keys(entry.scores).length})`),
         h('div', { class: 'scroll', style: 'max-height:360px' }, h('table', {}, h('tbody', {},
           Object.entries(entry.scores).sort((a, b) => b[1] - a[1]).map(([label, v]) => h('tr', {}, h('td', {}, labelRu(label)), h('td', { class: 'num' }, v.toFixed(4)))))))),
@@ -404,10 +419,11 @@ function comparisonView(c, patient, { compact = false } = {}) {
       if (!s.sameWeights) out.append(notice('Версии весов модели на двух ЭКГ различаются — оценки сравнивать нельзя.'));
       out.append(h('div', { class: 'scroll' }, h('table', {}, h('tbody', {}, s.changes.map(x => h('tr', {}, h('td', {}, labelRu(x.label)),
         h('td', { class: 'num' }, `${x.a.toFixed(2)} → ${x.b.toFixed(2)}`),
-        h('td', {}, [x.crossed ? `пересечён порог ${x.threshold}` : null, x.concordant ? 'согласуется с другой моделью' : 'только эта модель'].filter(Boolean).join('; ')),
+        h('td', {}, [x.crossed ? (x.b > x.a ? `стала выше порога ${x.threshold}` : `стала ниже порога ${x.threshold}`) : null, x.concordant ? 'та же метка так же изменилась в другой модели' : 'только эта модель'].filter(Boolean).join('; ')),
         h('td', {}, pill(x.level))))))));
     }
-    if (c.concordant.length) out.append(h('p', {}, h('b', {}, 'Согласованные изменения моделей: '), c.concordant.map(g => `${g.group} ${g.direction === 'up' ? '↑' : '↓'}`).join(', ')));
+    if (c.concordant.length) out.append(h('p', {}, h('b', {}, 'Согласованные изменения (SL и SSL, одна и та же метка): '), c.concordant.map(g => `${labelRu(g.label)} ${g.direction === 'up' ? '↑' : '↓'}`).join(', ')),
+      h('p', { class: 'muted' }, 'SL и SSL обучены на общих данных, поэтому их согласие — не полностью независимое подтверждение.'));
     out.append(notice('Оценки моделей не откалиброваны как вероятности; небольшие колебания между записями нормальны. В итог выносятся только изменения, в которых согласны хотя бы две модели. ' + DISCLAIMER));
     out.append(h('details', {}, h('summary', {}, 'Правила сравнения и источники'), h('div', { class: 'scroll' }, h('table', {}, h('tbody', {},
       RULES.measurements.map(r => h('tr', {}, h('td', {}, r.label), h('td', { class: 'muted' }, `шум <${r.noise}, заметно ≥${r.minor}, значимо ≥${r.major} ${r.unit}`),
@@ -543,6 +559,7 @@ async function start() {
   state.store = store; state.status = status;
   document.getElementById('mode').textContent = store.kind === 'server' ? 'Программа на компьютере · данные локально' : 'Веб-версия · данные в этом устройстве';
   try { state.labelsRu = await (await fetch('data/labels-ru.json')).json(); } catch { state.labelsRu = {}; }
+  if (status) try { state.thresholds = await (await fetch('/api/thresholds')).json(); } catch { state.thresholds = {}; }
   if (store.kind === 'browser' && 'serviceWorker' in navigator && location.protocol === 'https:' && !window.Capacitor)
     navigator.serviceWorker.register('sw.js').catch(() => {});
   window.addEventListener('hashchange', route);

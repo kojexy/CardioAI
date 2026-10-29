@@ -96,7 +96,7 @@ test('small noise stays below threshold; axis crossing normal range is flagged',
 });
 
 test('AI score comparison flags threshold crossing and big deltas only', () => {
-  const ai = s => ({ efficientnet: { model: 'SL', scores: s } });
+  const ai = s => ({ efficientnet: { model: 'SL', scores: s, thresholds: { AF: 0.074, LBBB: 0.5, X: 0.5, Y: 0.5 } } });
   const a = record(syntheticECG301(), { ai: ai({ AF: 0.1, LBBB: 0.40, X: 0.30, Y: 0.47 }) });
   const b = record(syntheticECG301({ id: '20260201120000' }), { ai: ai({ AF: 0.7, LBBB: 0.58, X: 0.33, Y: 0.53 }) });
   const [s] = compareRecords(a, b).scores;
@@ -140,7 +140,7 @@ test('model agreement: same group, same direction in two models', () => {
   const a = record(syntheticECG301(), { ai: mk(0.1, 0.15) });
   const b = record(syntheticECG301({ id: '20260201120000' }), { ai: mk(0.6, 0.7) });
   const c = compareRecords(a, b);
-  assert.deepEqual(c.concordant, [{ group: 'проводимость', direction: 'up' }]);
+  assert.deepEqual(c.concordant, [{ label: 'Left bundle branch block', group: 'проводимость', direction: 'up' }]);
   assert.ok(c.scores.every(m => m.changes[0].concordant));
 });
 
@@ -171,4 +171,16 @@ test('median beat is aligned on R even with a wide QRS', () => {
     assert.ok(Math.abs(at - m.preSamples) <= 2, `R at ${at}, expected ${m.preSamples}`);
     assert.ok(II[at] > 0.8, 'R amplitude survives baseline correction: ' + II[at]);
   }
+});
+
+test('no generic 0.5 threshold; tiny upstream thresholds work in logit space', () => {
+  const mk = (v, t) => ({ efficientnet: { scores: { Afib: v }, thresholds: t } });
+  const a = record(syntheticECG301(), { ai: mk(0.01) });
+  const b = record(syntheticECG301({ id: '20260201120000' }), { ai: mk(0.3) });
+  assert.equal(compareRecords(a, b).scores[0].changes[0].crossed, false);
+  const a2 = record(syntheticECG301(), { ai: mk(0.01, { Afib: 0.074 }) });
+  const b2 = record(syntheticECG301({ id: '20260201120000' }), { ai: mk(0.3, { Afib: 0.074 }) });
+  const ch = compareRecords(a2, b2).scores[0].changes[0];
+  assert.equal(ch.crossed, true);
+  assert.equal(ch.threshold, 0.074);
 });

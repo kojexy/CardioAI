@@ -59,7 +59,7 @@ export const RULES = {
   },
   scores: {
     levels: { small: { p: 0.05, logit: 0.3 }, minor: { p: 0.1, logit: 0.5 }, major: { p: 0.2, logit: 1.0 } },
-    threshold: 0.5, hysteresis: 0.05, top: 10, basis: 'practical',
+    hysteresisLogit: 0.25, top: 10, basis: 'practical',
   },
   trend: { minPoints: 3 },
 };
