@@ -1,31 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#1d5fa8"/><stop offset="1" stop-color="#0c2f5c"/>
-    </linearGradient>
-    <linearGradient id="sheet" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f3f6fa"/>
-    </linearGradient>
-    <pattern id="g1" width="24" height="24" patternUnits="userSpaceOnUse" x="212" y="252">
-      <path d="M24 0V24M0 24H24" stroke="#f4cfcf" stroke-width="2" fill="none"/>
-    </pattern>
-    <pattern id="g5" width="120" height="120" patternUnits="userSpaceOnUse" x="212" y="252">
-      <path d="M120 0V120M0 120H120" stroke="#e8a0a0" stroke-width="4" fill="none"/>
-    </pattern>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
-      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#04182f" flood-opacity=".45"/>
-    </filter>
-    <clipPath id="paper"><rect x="212" y="252" width="600" height="520" rx="44"/></clipPath>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#111827"/><stop offset="1" stop-color="#030712"/></linearGradient>
+    <linearGradient id="line" x1="150" y1="0" x2="874" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#34d399"/><stop offset=".45" stop-color="#22d3ee"/><stop offset="1" stop-color="#a78bfa"/></linearGradient>
+    <linearGradient id="spark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fde68a"/><stop offset="1" stop-color="#f472b6"/></linearGradient>
+    <filter id="g" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="22" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse"><path d="M64 0V64M0 64H64" stroke="#ffffff" stroke-opacity=".06" stroke-width="3"/></pattern>
   </defs>
   <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
-  <g filter="url(#shadow)"><rect x="212" y="252" width="600" height="520" rx="44" fill="url(#sheet)"/></g>
-  <g clip-path="url(#paper)">
-    <rect x="212" y="252" width="600" height="520" fill="url(#g1)"/>
-    <rect x="212" y="252" width="600" height="520" fill="url(#g5)"/>
-  </g>
-  <!-- one heartbeat: P wave, tall R spike breaking out of the sheet, deep S, T wave -->
-  <path d="M150 560 H300 Q322 524 344 560 H404 L432 588 L486 184 L548 690 L586 560 H632 Q680 474 728 560 H874"
-        fill="none" stroke="#ffffff" stroke-width="64" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>
-  <path d="M150 560 H300 Q322 524 344 560 H404 L432 588 L486 184 L548 690 L586 560 H632 Q680 474 728 560 H874"
-        fill="none" stroke="#d8343f" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect width="1024" height="1024" rx="228" fill="url(#grid)"/>
+  <path d="M150 600 H330 Q352 564 374 600 H420 L448 628 L500 260 L560 730 L598 600 H640 Q688 514 736 600 H874" fill="none" stroke="url(#line)" stroke-width="40" stroke-linecap="round" stroke-linejoin="round" filter="url(#g)"/>
+  <!-- AI sparkle -->
+  <path d="M760 170 C772 236 790 254 856 266 C790 278 772 296 760 362 C748 296 730 278 664 266 C730 254 748 236 760 170Z" fill="url(#spark)" filter="url(#g)"/>
+  <path d="M640 380 C646 410 654 418 684 424 C654 430 646 438 640 468 C634 438 626 430 596 424 C626 418 634 410 640 380Z" fill="#fde68a" opacity=".9"/>
 </svg>
