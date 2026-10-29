@@ -21,6 +21,7 @@ import webbrowser
 from ecg_reader import LEADS
 from patient_store import PatientStore
 from model_setup import ModelSetup, runtime_python, work_dir
+import folder_worker
 
 # In a packaged desktop build the module sits at the bundle root; resources keep repo layout.
 APP = (Path(sys._MEIPASS) / 'outputs/ecg-reader' if getattr(sys, 'frozen', False)
@@ -133,6 +134,34 @@ class LocalServer(ThreadingHTTPServer):
                 self.jobs[job['id']] = job
             except (OSError, ValueError, KeyError, TypeError):
                 continue
+        self.exchange = None
+        settings = folder_worker.load_settings(self.runs)
+        if settings.get('exchange_enabled') or os.environ.get('CARDIOAI_EXCHANGE') == '1':
+            self.set_exchange(True, settings.get('exchange_folder'))
+
+    def set_exchange(self, enabled, folder=None):
+        """Turn the exchange folder on or off (see folder_worker.py); remembered in settings.json."""
+        if folder is not None and not isinstance(folder, str):
+            raise ValueError('Некорректная папка')
+        folder = Path(folder).expanduser() if folder else folder_worker.default_folder(self.runs)
+        if not folder.is_absolute():
+            raise ValueError('Укажите полный путь к папке')
+        with self.lock:
+            if self.exchange:
+                self.exchange.stop()
+                self.exchange = None
+            if enabled:
+                self.exchange = folder_worker.FolderWorker(self.store, folder)
+                self.exchange.start()
+        folder_worker.save_settings(self.runs, exchange_enabled=bool(enabled), exchange_folder=str(folder))
+        return self.exchange_status()
+
+    def exchange_status(self):
+        with self.lock:
+            if self.exchange:
+                return dict(self.exchange.status(), enabled=True)
+        folder = folder_worker.load_settings(self.runs).get('exchange_folder') or str(folder_worker.default_folder(self.runs))
+        return dict(enabled=False, running=False, folder=folder, error=None, recent=[])
 
     def save_job(self, job_id):
         job = {k:v for k,v in self.jobs[job_id].items() if k != 'report'}
@@ -314,6 +343,8 @@ class Handler(BaseHTTPRequestHandler):
                                         storage=True, data_dir=str(self.server.store.root)))
         if self.path == '/api/setup':
             return self.answer(200, self.server.setup.status(self.server.models()))
+        if self.path == '/api/exchange':
+            return self.answer(200, self.server.exchange_status())
         if self.path == '/api/thresholds':
             return self.answer(200, upstream_thresholds())
         if self.path == '/app':
@@ -424,6 +455,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/setup/start':
                 self.server.setup.start()
                 return self.answer(202, self.server.setup.status(self.server.models()))
+            if self.path == '/api/exchange':
+                return self.answer(200, self.server.set_exchange(data.get('enabled') is True, data.get('folder')))
             if self.path == '/api/store/patient':
                 return self.answer(200, self.server.store.save_patient(data))
             if self.path == '/api/store/record':

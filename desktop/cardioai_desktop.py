@@ -71,6 +71,9 @@ def main():
     data.mkdir(parents=True, exist_ok=True)
     os.environ['CARDIOAI_DATA'] = str(data)
     os.environ['CARDIOAI_WORK'] = str(choose_work_dir(data))
+    if '--exchange' in sys.argv:
+        # Home computer mode: process the exchange folder (see outputs/ecg-reader/folder_worker.py).
+        os.environ['CARDIOAI_EXCHANGE'] = '1'
     from deepecg_local_server import LocalServer
     headless = '--headless' in sys.argv
     port = int(os.environ.get('CARDIOAI_PORT', '0'))

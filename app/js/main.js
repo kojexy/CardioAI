@@ -26,6 +26,8 @@ function h(tag, attrs = {}, ...children) {
 const card = (...c) => h('section', { class: 'card' }, ...c);
 const pill = level => h('span', { class: 'pill lvl-' + level }, LEVEL_TEXT[level]);
 const notice = text => h('div', { class: 'notice' }, text);
+// replaceChildren() would print null/false as text; skip empty parts like h() does.
+const fill = (el, ...c) => el.replaceChildren(...c.flat().filter(x => x != null && x !== false));
 const DISCLAIMER = 'Исследовательская программа. Результаты — технические оценки, а не диагноз. Решение принимает врач.';
 
 function fmtDate(iso, withTime = false) {
@@ -522,7 +524,7 @@ function setupCard() {
       if (!r.ok) { draw({ ...st, error: data.error }); return; }
       draw(data); poll();
     } }, all ? 'Переустановить / проверить' : 'Установить нейросети');
-    box.replaceChildren(h('h2', {}, 'Нейросети на этом компьютере'),
+    fill(box, h('h2', {}, 'Нейросети на этом компьютере'),
       h('p', {}, 'Расчёт идёт только здесь. Запись ЭКГ в интернет не отправляется.'),
       h('div', { class: 'row' }, [['efficientnet', 'DeepECG SL'], ['wcr', 'DeepECG SSL'], ['ecgfounder', 'ECGFounder']].map(([k, l]) =>
         h('span', { class: 'pill ' + (m[k] ? 'lvl-none' : 'lvl-minor') }, l + (m[k] ? ' · готова' : ' · не установлена')))),
@@ -547,6 +549,42 @@ function setupCard() {
   return box;
 }
 
+// Exchange folder: ECG files dropped into a (synced) folder are filed under the patient (desktop only).
+function exchangeCard() {
+  const box = card(h('h2', {}, 'Папка обмена'), h('p', { class: 'muted' }, 'Проверка…'));
+  const token = document.querySelector('meta[name="cardioai-token"]')?.content;
+  const STATUS = { ok: 'добавлена', duplicate: 'уже была', error: 'ошибка' };
+  const send = async body => {
+    const r = await fetch('/api/exchange', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-ECG-Token': token }, body: JSON.stringify(body) });
+    const data = await r.json();
+    if (!r.ok) throw Error(data.error);
+    return data;
+  };
+  const draw = (st, error) => {
+    const folder = h('input', { value: st.folder || '', 'aria-label': 'Путь к папке обмена', spellcheck: 'false' });
+    const toggle = h('button', { class: st.enabled ? '' : 'primary', onclick: async () => {
+      try { draw(await send({ enabled: !st.enabled, folder: folder.value.trim() || null })); }
+      catch (err) { draw(st, err.message); }
+    } }, st.enabled ? 'Выключить' : 'Включить');
+    fill(box, h('h2', {}, 'Папка обмена'),
+      h('p', {}, 'Положите файл прибора в папку «Входящие/Фамилия Имя» — программа сама добавит ЭКГ в карточку пациента и запишет результат в «Результаты». Если папка лежит в Google Drive, Яндекс Диске или Dropbox, файлы можно присылать с телефона или другого компьютера.'),
+      h('label', {}, 'Папка', folder),
+      h('div', { class: 'row' }, toggle, h('button', { onclick: refresh }, 'Обновить'),
+        h('span', { class: 'pill ' + (st.enabled ? (st.error ? 'lvl-major' : 'lvl-none') : 'lvl-small') }, st.enabled ? (st.error ? 'папка недоступна' : 'работает') : 'выключена')),
+      error || st.error ? h('p', { class: 'error' }, error || st.error) : null,
+      st.recent?.length ? h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Файл'), h('th', {}, 'Пациент'), h('th', {}, 'Итог'))),
+        h('tbody', {}, [...st.recent].reverse().map(e => h('tr', {}, h('td', {}, e.file), h('td', {}, e.patient || '—'),
+          h('td', { class: e.status === 'error' ? 'error' : '' }, (STATUS[e.status] || e.status) + (e.new_patient ? ', новый пациент' : '') + (e.error ? ': ' + e.error : ''))))))) : null,
+      h('p', { class: 'muted' }, 'Папка работает, пока программа открыта на этом компьютере.'));
+  };
+  const refresh = async () => {
+    try { draw(await (await fetch('/api/exchange')).json()); }
+    catch (err) { box.replaceChildren(h('p', { class: 'error' }, 'Нет связи с программой: ' + err.message)); }
+  };
+  refresh();
+  return box;
+}
+
 async function viewSettings() {
   const msg = h('p', { role: 'status' });
   const file = h('input', { type: 'file', accept: '.json,application/json' });
@@ -568,6 +606,7 @@ async function viewSettings() {
         msg.className = 'success'; msg.textContent = `Загружено: пациентов ${res.patients}, ЭКГ ${res.records}.`;
       } catch (err) { msg.className = 'error'; msg.textContent = err.message; }
     } }, 'Загрузить копию'), msg),
+    ...(state.store.kind === 'server' ? [exchangeCard()] : []),
     card(h('h2', {}, 'О программе'), h('p', {}, 'CardioAI — локальная исследовательская программа для просмотра ЭКГ, ведения истории и сравнения записей.'),
       h('p', { class: 'muted' }, 'Правила сравнения: версия ' + RULES.version + '. Пороги частично взяты из публикаций, частично — практические (см. docs/research).'), notice(DISCLAIMER)));
 }

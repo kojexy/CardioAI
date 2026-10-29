@@ -22,7 +22,7 @@ a = Analysis(
     [str(root / 'desktop' / 'cardioai_desktop.py')],
     pathex=[str(reader)],
     datas=datas,
-    hiddenimports=['deepecg_local_server', 'patient_store', 'model_setup', 'ecg_reader', 'founder_report', 'research_report'],
+    hiddenimports=['deepecg_local_server', 'patient_store', 'model_setup', 'folder_worker', 'ecg_reader', 'founder_report', 'research_report'],
     excludes=['numpy', 'scipy', 'torch', 'pandas', 'matplotlib', 'tkinter'],
 )
 pyz = PYZ(a.pure)
