@@ -1,0 +1,37 @@
+{
+  "source_repo": "https://github.com/PKUDigitalHealth/ECGFounder",
+  "source_revision": "04edac702b61c91face519774ddcc0cd712fef23",
+  "source_files": {
+    "net1d.py": "832bf90e05e20e62db6f9c7007acf7f0b1f739938ab80fa9b2c1ad438e8da7f7",
+    "tasks.txt": "7c087a0d383c7ea9ae9b818ad00a551b029334edfa5f1fbb5036bfbaa0df0c39",
+    "ptbxl_eval.py": "c16759b2477ae9fcdd24b9190411796bc7656a562cec750b229677c14812a176",
+    "dataset.py": "b113a9c35fdbb94923e2a88ccbaff4b4e04a5ca1fc8c732ee9fa6de5d49b4a31",
+    "util.py": "79972b6c8e769f75e1fa766879ce7de50125e621fb0b0dcce1af45e3bfac4184"
+  },
+  "weight_sha256": "ee199f3781f4ae1f732973267f003da0a759ea12bddb0dd28a77faa60aca7997",
+  "weight_size": 369942585,
+  "weight_revision": "d9b1793951b2342f5f7e84f1ac03cd37f8a08724",
+  "preprocessing": {
+    "branch": "official ptbxl_eval.py PTBXL_Dataset",
+    "rate_hz": 500,
+    "duration_seconds": 10,
+    "lead_order": [
+      "I",
+      "II",
+      "III",
+      "aVR",
+      "aVL",
+      "aVF",
+      "V1",
+      "V2",
+      "V3",
+      "V4",
+      "V5",
+      "V6"
+    ],
+    "normalization": "one global mean and std over all channels and samples; epsilon 1e-8",
+    "extra_filtering": false,
+    "rate_conversion": "resample_poly preserves physical time; no length-only stretch",
+    "note": "Official PTB-XL evaluation uses global z-score without additional filtering. Other downstream dataset.py branches use filtering; they are not this classifier inference branch."
+  }
+}

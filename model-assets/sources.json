@@ -1,0 +1,22 @@
+{
+  "sources": [
+    {
+      "folder": "DeepECG_Docker",
+      "repo": "HeartWise-AI/DeepECG_Docker",
+      "revision": "cabf6c06b74731c86b8c5a27ae7101f14db5ec38",
+      "archive_sha256": "f040ad331a363d2fc2466947a6f57ddaa3e0e2bbb8954e7bbc397bf25e99dc44"
+    },
+    {
+      "folder": "ECGFounder",
+      "repo": "PKUDigitalHealth/ECGFounder",
+      "revision": "04edac702b61c91face519774ddcc0cd712fef23",
+      "archive_sha256": "f09a9f7f3b0e077e49a8ab92bf376c5db758855350a84eb6764aa4c8e1188a39"
+    },
+    {
+      "folder": "fairseq-signals",
+      "repo": "HeartWise-AI/fairseq-signals",
+      "revision": "bb3901447e2175ed5832b03170b89dbbdcf85062",
+      "archive_sha256": "f4db458998923d97784977d6ee4a4269df77b027bee5791913f373f74868331f"
+    }
+  ]
+}

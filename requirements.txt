@@ -1,0 +1,17 @@
+# Versions used for the verified three-model CPU run (Python 3.12, macOS ARM64).
+numpy==2.3.5
+pandas==2.2.3
+scipy==1.18.1
+torch==2.9.0
+matplotlib==3.11.2
+statsmodels==0.15.0
+transformers==4.44.2
+huggingface-hub==0.36.2
+hydra-core==1.3.8
+omegaconf==2.3.1
+bitarray==3.12.3
+sacrebleu==2.6.0
+soundfile==0.14.0
+wfdb==4.3.1
+tqdm==4.70.1
+scikit-learn==1.9.1
