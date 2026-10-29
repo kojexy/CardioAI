@@ -513,17 +513,21 @@ function setupCard() {
   const box = card(h('h2', {}, 'Нейросети на этом компьютере'), h('p', { class: 'muted' }, 'Проверка…'));
   const token = document.querySelector('meta[name="cardioai-token"]')?.content;
   let timer = null;
+  const gb = v => Number(v).toLocaleString('ru-RU', { maximumFractionDigits: 1 });
   const draw = st => {
     const m = st.models || {};
     const all = ['efficientnet', 'wcr', 'ecgfounder'].every(k => m[k]);
-    const bar = h('progress', { max: 1, value: st.progress || 0, style: 'width:100%' });
-    const button = h('button', { class: 'primary', disabled: st.running || !st.supported, onclick: async () => {
-      button.disabled = true;
-      const r = await fetch('/api/setup/start', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-ECG-Token': token }, body: '{}' });
+    // pip reports no progress: show a moving bar instead of a bar stuck at 0 %.
+    const bar = h('progress', st.step === 'packages' && st.running ? { style: 'width:100%' } : { max: 1, value: st.progress || 0, style: 'width:100%' });
+    const post = async path => {
+      const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-ECG-Token': token }, body: '{}' });
       const data = await r.json();
       if (!r.ok) { draw({ ...st, error: data.error }); return; }
       draw(data); poll();
-    } }, all ? 'Переустановить / проверить' : 'Установить нейросети');
+    };
+    const button = h('button', { class: 'primary', disabled: st.running || !st.supported, onclick: () => { button.disabled = true; post('/api/setup/start'); } },
+      all ? 'Переустановить / проверить' : (st.error ? 'Продолжить установку' : 'Установить нейросети'));
+    const cancel = st.running ? h('button', { onclick: () => post('/api/setup/cancel') }, 'Отменить') : null;
     fill(box, h('h2', {}, 'Нейросети на этом компьютере'),
       h('p', {}, 'Расчёт идёт только здесь. Запись ЭКГ в интернет не отправляется.'),
       h('div', { class: 'row' }, [['efficientnet', 'DeepECG SL'], ['wcr', 'DeepECG SSL'], ['ecgfounder', 'ECGFounder']].map(([k, l]) =>
@@ -531,10 +535,10 @@ function setupCard() {
       ...(st.warnings || []).map(w => notice(w)),
       st.running || st.finished || st.error ? h('div', {}, bar, h('p', { class: st.error ? 'error' : 'muted' }, st.error || st.message)) : null,
       all && !st.running ? h('p', {}, h('a', { href: '/' }, 'Открыть модуль запуска моделей →')) : null,
-      !all || st.error ? h('p', { class: 'muted' }, `Один раз скачивается около 4 ГБ: Python, PyTorch и веса моделей с официальных страниц авторов; каждый файл проверяется по контрольной сумме. Нужно около 7 ГБ свободного места${st.free_gb != null ? ' (сейчас свободно ' + st.free_gb + ' ГБ)' : ''}. Папка: ${st.work_dir}.`) : null,
-      st.supported ? null : notice('Для этого компьютера нет готовой сборки нейросетей. Поддерживаются Windows x64, Mac на Apple Silicon и Linux x64.'),
-      h('div', { class: 'row' }, button),
-      h('p', { class: 'muted' }, 'После расчёта откройте ЭКГ пациента и нажмите «Прикрепить расчёт» — оценки появятся в профиле и в сравнении.'));
+      !all || st.error ? h('p', { class: 'muted' }, `Один раз скачивается около 4 ГБ: Python, PyTorch и веса моделей с официальных страниц авторов; каждый файл проверяется по контрольной сумме. Прерванная загрузка продолжается с того же места. Нужно ещё около ${gb(st.need_gb ?? 7)} ГБ свободного места${st.free_gb != null ? ' (сейчас свободно ' + gb(st.free_gb) + ' ГБ)' : ''}. Папка: ${st.work_dir}.`) : null,
+      st.supported ? null : notice('Для этого компьютера нет готовой сборки нейросетей. Поддерживаются Windows x64 и Mac на Apple Silicon (M1 и новее).'),
+      h('div', { class: 'row' }, button, cancel),
+      notice('Файл прибора ECG301 содержит 3 секунды записи, а моделям нужно 10 секунд с подтверждённой калибровкой. Поэтому по файлам прибора нейросети пока не запускаются. Готовый результат расчёта (файл JSON) можно прикрепить к ЭКГ пациента кнопкой «Прикрепить расчёт».'));
   };
   const poll = async () => {
     clearTimeout(timer);
@@ -566,11 +570,18 @@ function exchangeCard() {
       try { draw(await send({ enabled: !st.enabled, folder: folder.value.trim() || null })); }
       catch (err) { draw(st, err.message); }
     } }, st.enabled ? 'Выключить' : 'Включить');
+    const open = h('button', { onclick: async () => {
+      const r = await fetch('/api/exchange/open', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-ECG-Token': token }, body: '{}' });
+      if (!r.ok) draw(st, (await r.json()).error);
+    } }, 'Открыть папку');
+    const [pillClass, pillText] = !st.enabled ? ['lvl-small', 'выключена'] : st.error ? ['lvl-major', 'папка недоступна'] : st.running ? ['lvl-none', 'работает'] : ['lvl-major', 'остановлена — выключите и включите'];
     fill(box, h('h2', {}, 'Папка обмена'),
-      h('p', {}, 'Положите файл прибора в папку «Входящие/Фамилия Имя» — программа сама добавит ЭКГ в карточку пациента и запишет результат в «Результаты». Если папка лежит в Google Drive, Яндекс Диске или Dropbox, файлы можно присылать с телефона или другого компьютера.'),
+      h('p', {}, 'Положите файл прибора в папку «Входящие/Фамилия Имя» — программа сама добавит ЭКГ в карточку пациента и запишет результат в «Результаты». Если есть тёзки, добавьте дату рождения: «Иванов Иван 1980-05-01».'),
+      h('p', { class: 'muted' }, 'Если папка лежит в Google Drive, Яндекс Диске или Dropbox, файлы можно присылать с телефона или другого компьютера.'),
+      st.cloud ? notice('Папка похожа на облачную. ФИО и ЭКГ пациентов будут храниться и у облачного сервиса. Решите, допустимо ли это для ваших пациентов.') : null,
       h('label', {}, 'Папка', folder),
-      h('div', { class: 'row' }, toggle, h('button', { onclick: refresh }, 'Обновить'),
-        h('span', { class: 'pill ' + (st.enabled ? (st.error ? 'lvl-major' : 'lvl-none') : 'lvl-small') }, st.enabled ? (st.error ? 'папка недоступна' : 'работает') : 'выключена')),
+      h('div', { class: 'row' }, toggle, st.enabled ? open : null, h('button', { onclick: refresh }, 'Обновить'),
+        h('span', { class: 'pill ' + pillClass }, pillText)),
       error || st.error ? h('p', { class: 'error' }, error || st.error) : null,
       st.recent?.length ? h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Файл'), h('th', {}, 'Пациент'), h('th', {}, 'Итог'))),
         h('tbody', {}, [...st.recent].reverse().map(e => h('tr', {}, h('td', {}, e.file), h('td', {}, e.patient || '—'),

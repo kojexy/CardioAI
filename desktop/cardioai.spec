@@ -27,7 +27,8 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 icon = str(root / 'desktop' / ('icon.icns' if sys.platform == 'darwin' else 'icon.ico'))
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='CardioAI', console=False,
+# UTF-8 mode: Windows would otherwise read and write text files in the ANSI code page.
+exe = EXE(pyz, a.scripts, [('X utf8_mode=1', None, 'OPTION')], exclude_binaries=True, name='CardioAI', console=False,
           icon=icon if Path(icon).is_file() else None)
 coll = COLLECT(exe, a.binaries, a.datas, name='CardioAI')
 if sys.platform == 'darwin':

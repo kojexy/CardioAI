@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -23,7 +24,6 @@ APP = (Path(sys._MEIPASS) / 'outputs/ecg-reader' if getattr(sys, 'frozen', False
        else Path(__file__).resolve().parent)
 RESOURCES = APP.parents[1]  # repo root, or the bundle root of the packaged program
 PYTHON_RELEASES = 'https://github.com/astral-sh/python-build-standalone/releases/download/'
-NEED_FREE_GB = 7
 SF_DATALESS = 0x40000000  # macOS: file content is only in iCloud
 
 
@@ -48,6 +48,24 @@ def runtime_python(work=None):
         if candidate.is_file():
             return candidate
     return None
+
+
+def packages_ready(work=None):
+    """True when the program's Python has the packages of the current requirements.txt."""
+    try:
+        marker = (work or work_dir()) / 'runtime/packages.json'
+        return json.loads(marker.read_text(encoding='utf-8')).get('requirements_sha256') == requirements_digest()
+    except (OSError, ValueError):
+        return False
+
+
+def clean_env(**extra):
+    """Environment for the program's own Python: no user packages or pip settings from this computer."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ('PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'VIRTUAL_ENV') and not k.startswith('PIP_')}
+    env.update(PYTHONNOUSERSITE='1', PIP_CONFIG_FILE=os.devnull, PIP_DISABLE_PIP_VERSION_CHECK='1',
+               PYTHONDONTWRITEBYTECODE='1', PYTHONUTF8='1', CARDIOAI_WORK=str(work_dir()), **extra)
+    return env
 
 
 def requirements_digest():
@@ -81,7 +99,7 @@ def offloaded_files(folder):
 def weight_files():
     out = []
     for meta_path in sorted((RESOURCES / 'model-assets').glob('*.pt*.json')):
-        meta = json.loads(meta_path.read_text())
+        meta = json.loads(meta_path.read_text(encoding='utf-8'))
         name = meta.get('file', meta.get('filename'))
         folder = 'ecgfounder-weights' if name.endswith('.pth') else 'deepecg-weights'
         out.append((name, folder, int(meta.get('size_bytes', meta.get('size')))))
@@ -94,17 +112,15 @@ class ModelSetup:
     def __init__(self):
         self.lock = threading.Lock()
         self.thread = None
+        self.process = None
+        self.cancelled = threading.Event()
         self.state = dict(running=False, step=None, message='', progress=0.0, error=None, finished=False)
 
     # ----- status
     def status(self, models=None):
         work = work_dir()
         py = runtime_python(work)
-        marker = work / 'runtime/packages.json'
-        try:
-            packages = json.loads(marker.read_text()).get('requirements_sha256') == requirements_digest()
-        except (OSError, ValueError):
-            packages = False
+        packages = packages_ready(work)
         warnings = []
         if offloaded_files(work):
             warnings.append('Часть файлов моделей хранится только в iCloud. Перенесите папку моделей из «Документов» или «Рабочего стола» — иначе расчёт может зависнуть.')
@@ -116,6 +132,7 @@ class ModelSetup:
             state = dict(self.state)
         return dict(state, platform=platform_key(), work_dir=str(work), free_gb=round(free_gb, 1) if free_gb else None,
                     runtime=bool(py), packages=packages, models=models or {}, warnings=warnings,
+                    need_gb=round(self.need_gb(work), 1),
                     supported=platform_key() is not None)
 
     def _set(self, **kw):
@@ -130,8 +147,35 @@ class ModelSetup:
             if platform_key() is None:
                 raise ValueError('Для этого компьютера нет готовой сборки нейросетей (поддерживаются Windows x64, Mac на Apple Silicon, Linux x64)')
             self.state = dict(running=True, step='check', message='Проверка места на диске…', progress=0.0, error=None, finished=False)
+            self.cancelled.clear()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+
+    def stop(self):
+        """Cancel the install: stops the running download or pip (the next start continues from here)."""
+        self.cancelled.set()
+        process = self.process
+        if process and process.poll() is None:
+            try:
+                if hasattr(os, 'killpg'):
+                    os.killpg(process.pid, signal.SIGTERM)
+                else:
+                    process.terminate()
+            except OSError:
+                pass
+
+    def _check_cancel(self):
+        if self.cancelled.is_set():
+            raise RuntimeError('Установка отменена. Нажмите кнопку ещё раз, чтобы продолжить.')
+
+    def need_gb(self, work):
+        """Free space still needed: Python + packages if missing, plus weights not yet downloaded."""
+        need = 0.0 if runtime_python(work) and packages_ready(work) else 4.5
+        for name, folder, size in weight_files():
+            path = work / folder / name
+            if not (path.is_file() and path.stat().st_size == size):
+                need += size / 1e9
+        return need + 0.5 if need else 0.0
 
     def _run(self):
         work = work_dir()
@@ -139,9 +183,9 @@ class ModelSetup:
             work.mkdir(parents=True, exist_ok=True)
             if offloaded_files(work):
                 raise RuntimeError('Папка моделей находится в iCloud и часть файлов выгружена. Выберите папку вне iCloud.')
-            free = shutil.disk_usage(work).free / 1e9
-            if free < NEED_FREE_GB and not runtime_python(work):
-                raise RuntimeError(f'Недостаточно места: свободно {free:.1f} ГБ, нужно около {NEED_FREE_GB} ГБ')
+            free, need = shutil.disk_usage(work).free / 1e9, self.need_gb(work)
+            if free < need:
+                raise RuntimeError(f'Недостаточно места: свободно {free:.1f} ГБ, нужно около {need:.1f} ГБ')
             log = (work / 'setup.log').open('a', encoding='utf-8')
             log.write(f'\n=== setup {time.strftime("%Y-%m-%d %H:%M:%S")} {platform_key()} ===\n')
             try:
@@ -151,7 +195,8 @@ class ModelSetup:
                 self._self_test(work, log)
             finally:
                 log.close()
-            self._set(running=False, finished=True, step='done', progress=1.0, message='Нейросети установлены и проверены.')
+            self._set(running=False, finished=True, step='done', progress=1.0,
+                      message='Нейросети установлены. Пробный расчёт всех трёх моделей на искусственном сигнале прошёл.')
         except Exception as exc:  # reported to the user; details are in setup.log
             self._set(running=False, error=str(exc), message='Установка остановлена.')
 
@@ -163,6 +208,7 @@ class ModelSetup:
         with urllib.request.urlopen(url, timeout=120) as response, part.open('wb') as out:
             done = 0
             while chunk := response.read(1024 * 1024):
+                self._check_cancel()
                 out.write(chunk)
                 done += len(chunk)
                 self._set(message=f'{label}: {done / 1e6:.0f} из {size / 1e6:.0f} МБ', progress=min(done / size, 1.0))
@@ -174,7 +220,7 @@ class ModelSetup:
     def _runtime(self, work, log):
         if runtime_python(work):
             return
-        pins = json.loads((RESOURCES / 'model-assets/runtime.json').read_text())
+        pins = json.loads((RESOURCES / 'model-assets/runtime.json').read_text(encoding='utf-8'))
         build = pins['builds'][platform_key()]
         self._set(step='runtime', message='Загрузка Python…', progress=0.0)
         archive = work / 'downloads' / build['file']
@@ -198,30 +244,43 @@ class ModelSetup:
         log.write('runtime ok: ' + str(py) + '\n')
 
     def _command(self, args, log, label, progress=None):
-        env = dict(os.environ, CARDIOAI_WORK=str(work_dir()), PYTHONDONTWRITEBYTECODE='1', PYTHONUTF8='1')
-        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True,
-                                   encoding='utf-8', errors='replace', cwd=str(work_dir()))
-        for line in process.stdout:
-            log.write(line)
-            log.flush()
-            text = line.strip()
-            if text:
-                self._set(message=f'{label}: {text[:140]}', **({'progress': progress()} if progress else {}))
-        if process.wait():
-            raise RuntimeError(f'{label}: ошибка (код {process.returncode}). Подробности — в файле setup.log')
+        self._check_cancel()
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=clean_env(), text=True,
+                                   encoding='utf-8', errors='replace', cwd=str(work_dir()),
+                                   start_new_session=hasattr(os, 'killpg'))
+        self.process = process
+        done = threading.Event()
+
+        def tick():  # downloads print one line per file, so refresh the bar from the file sizes
+            while not done.wait(1.5):
+                self._set(progress=progress())
+        if progress:
+            threading.Thread(target=tick, daemon=True).start()
+        try:
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                text = line.strip()
+                if text:
+                    self._set(message=f'{label}: {text[:140]}')
+            code = process.wait()
+        finally:
+            done.set()
+            self.process = None
+        self._check_cancel()
+        if code:
+            raise RuntimeError(f'{label}: ошибка (код {code}). Подробности — в файле setup.log')
 
     def _packages(self, work, log):
         marker = work / 'runtime/packages.json'
         try:
-            if json.loads(marker.read_text()).get('requirements_sha256') == requirements_digest():
+            if json.loads(marker.read_text(encoding='utf-8')).get('requirements_sha256') == requirements_digest():
                 return
         except (OSError, ValueError):
             pass
-        self._set(step='packages', message='Установка PyTorch и библиотек (около 1 ГБ)…', progress=0.0)
+        self._set(step='packages', message='Установка PyTorch и библиотек (около 1 ГБ, 5–30 минут)…', progress=0.0)
         args = [str(runtime_python(work)), '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input',
-                '--prefer-binary', '-r', str(RESOURCES / 'requirements.txt')]
-        if platform_key() == 'linux-x86_64':
-            args += ['--extra-index-url', 'https://download.pytorch.org/whl/cpu']
+                '--no-cache-dir', '--prefer-binary', '-r', str(RESOURCES / 'requirements.txt')]
         self._command(args, log, 'Библиотеки')
         marker.write_text(json.dumps({'requirements_sha256': requirements_digest(), 'installed_at': time.time()}))
 
@@ -240,10 +299,16 @@ class ModelSetup:
         self._command([str(runtime_python(work)), str(RESOURCES / 'scripts/setup_models.py')], log, 'Модели', progress)
 
     def _self_test(self, work, log):
-        self._set(step='test', message='Проверка: тестовый расчёт EfficientNet…', progress=1.0)
-        report = work / f'selftest-{int(time.time())}.json'
-        self._command([str(runtime_python(work)), str(APP / 'deepecg_run_local.py'), '--model', 'efficientnet',
-                       '--smoke-test', '--report', str(report)], log, 'Проверка')
-        result = json.loads(report.read_text())
-        if len(result.get('scores', {})) != 77:
-            raise RuntimeError('Тестовый расчёт вернул неожиданный результат')
+        py = str(runtime_python(work))
+        tests = [('efficientnet', 'DeepECG SL', [py, str(APP / 'deepecg_run_local.py'), '--model', 'efficientnet'], 77),
+                 ('wcr', 'DeepECG SSL', [py, str(APP / 'deepecg_run_local.py'), '--model', 'wcr'], 77),
+                 ('ecgfounder', 'ECGFounder', [py, str(APP / 'ecgfounder_run_local.py')], 150)]
+        for i, (key, name, command, expected) in enumerate(tests):
+            self._set(step='test', message=f'Пробный расчёт {name} на искусственном сигнале…', progress=i / len(tests))
+            report = work / 'selftest' / f'{key}.json'
+            report.parent.mkdir(exist_ok=True)
+            report.unlink(missing_ok=True)
+            self._command(command + ['--smoke-test', '--report', str(report)], log, 'Проверка ' + name)
+            result = json.loads(report.read_text(encoding='utf-8'))
+            if len(result.get('scores', {})) != expected:
+                raise RuntimeError(f'Пробный расчёт {name} вернул неожиданный результат')

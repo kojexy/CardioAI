@@ -8,6 +8,8 @@ from pathlib import Path
 import shutil
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,17 +25,37 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def download(url, target, expected):
-    if target.is_file() and sha256(target) == expected:
-        print('Verified:', target.name, flush=True)
-        return
-    if target.exists():
-        raise ValueError('Existing asset has an unexpected checksum: ' + str(target))
+def download(url, target, expected, attempts=4):
+    """Download with resume (.part + HTTP Range) and retries; keep the file only if SHA256 matches."""
+    if target.is_file():
+        if sha256(target) == expected:
+            print('Verified:', target.name, flush=True)
+            return
+        # A damaged earlier download: keep it aside for inspection and fetch again.
+        target.replace(target.with_name(target.name + '.bad'))
+        print('Checksum mismatch, downloading again:', target.name, flush=True)
     target.parent.mkdir(parents=True, exist_ok=True)
     part = target.with_name(target.name + '.part')
     print('Downloading:', url, flush=True)
-    with urllib.request.urlopen(url, timeout=120) as response, part.open('wb') as out:
-        shutil.copyfileobj(response, out, 1024 * 1024)
+    for attempt in range(1, attempts + 1):
+        done = part.stat().st_size if part.is_file() else 0
+        request = urllib.request.Request(url, headers={'Range': f'bytes={done}-'} if done else {})
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                resumed = done and response.status == 206
+                with part.open('ab' if resumed else 'wb') as out:
+                    shutil.copyfileobj(response, out, 1024 * 1024)
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416:  # nothing left to fetch: the .part is complete (or wrong; the hash decides)
+                break
+            if attempt == attempts:
+                raise
+        except OSError:
+            if attempt == attempts:
+                raise
+        print(f'Connection lost, retry {attempt} of {attempts - 1}:', target.name, flush=True)
+        time.sleep(5 * attempt)
     if sha256(part) != expected:
         part.unlink()
         raise ValueError('Downloaded asset SHA256 mismatch: ' + target.name)

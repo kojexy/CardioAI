@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """CardioAI desktop program: the local server inside its own window (Windows, macOS).
 
-Patients, history and comparison work everywhere. Neural networks run only when a full
-CardioAI install with models (work/deepecg-venv, work/*-weights) is found; see README.
+Patients, history and comparison work everywhere. The neural networks are installed by the
+program itself ("Анализ ИИ" → "Установить нейросети", model_setup.py).
+Flags: --headless (server only, no window), --exchange (process the exchange folder this run).
 """
 import json
 import os
@@ -31,8 +32,8 @@ def choose_work_dir(data):
     """Folder for the neural networks (runtime, sources, weights).
 
     Order: CARDIOAI_WORK; "work_dir" in settings.json of the data folder; an existing
-    install with weights (source checkout); otherwise <data folder>/work, where the
-    "Install neural networks" button puts everything.
+    install (source checkout only); otherwise %LOCALAPPDATA%\\CardioAI\\work on Windows or
+    <data folder>/work elsewhere, where the "Install neural networks" button puts everything.
     """
     if os.environ.get('CARDIOAI_WORK'):
         return Path(os.environ['CARDIOAI_WORK'])
@@ -42,11 +43,14 @@ def choose_work_dir(data):
             return Path(configured)
     except (OSError, ValueError, AttributeError):
         pass
-    candidates = [Path(__file__).resolve().parents[1] / 'work'] if not getattr(sys, 'frozen', False) else []
-    candidates += [Path.home() / 'CardioAI/work', Path.home() / 'Projects/CardioAI/work']
-    for work in candidates:
-        if (work / 'deepecg-weights').is_dir():
-            return work
+    if not getattr(sys, 'frozen', False):
+        # Running from a source checkout: reuse its existing model install.
+        for work in (Path(__file__).resolve().parents[1] / 'work', Path.home() / 'Projects/CardioAI/work'):
+            if (work / 'deepecg-weights').is_dir():
+                return work
+    if sys.platform == 'win32':
+        # 4 GB of models must not go to the roaming profile (synced at every log-on in office networks).
+        return Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData/Local')) / 'CardioAI/work'
     return data / 'work'
 
 
@@ -105,6 +109,13 @@ def main():
     api.window = webview.create_window('CardioAI', url, js_api=api, width=1240, height=880, min_size=(380, 600))
     try:
         webview.start(private_mode=False)
+    except Exception:  # e.g. WebView2 missing on an old Windows: the browser still works
+        print('CardioAI: ' + url, flush=True)
+        webbrowser.open(url)
+        try:
+            thread.join()
+        except KeyboardInterrupt:
+            pass
     finally:
         server.shutdown()
         server.server_close()

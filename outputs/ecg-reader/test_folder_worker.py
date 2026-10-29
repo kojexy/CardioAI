@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import tempfile
 import threading
+import unicodedata
 import unittest
 import urllib.error
 import urllib.request
@@ -67,7 +69,7 @@ class FolderWorkerTest(unittest.TestCase):
 
     def test_exchange_folder(self):
         store = PatientStore(self.dir / 'store')
-        worker = FolderWorker(store, self.dir / 'exchange')
+        worker = FolderWorker(store, self.dir / 'exchange', partial_wait=0)
         worker.start()
         worker.stop()
         self.assertTrue((worker.root / 'Как пользоваться.txt').is_file())
@@ -99,8 +101,37 @@ class FolderWorkerTest(unittest.TestCase):
         self.assertEqual(len(store.list_patients()), 1)
         self.assertEqual([p for p in (worker.root / INBOX).rglob('*') if p.is_file()], [])
 
+    def test_namesakes_and_other_patients(self):
+        store = PatientStore(self.dir / 'store')
+        for pid, birth in (('1' * 32, '1950-01-01'), ('2' * 32, '1980-05-01')):
+            store.save_patient({'id': pid, 'surname': 'Петров', 'name': 'Сергей', 'birthDate': birth})
+        worker = FolderWorker(store, self.dir / 'exchange', partial_wait=0)
+        worker.start()
+        worker.stop()
+        # Two namesakes and no birth date in the folder name: refuse to guess.
+        self.drop(worker, 'Петров Сергей/ecg')
+        self.assertIn('несколько пациентов', worker.status()['recent'][-1]['error'])
+        self.assertEqual(store.list_records('1' * 32) + store.list_records('2' * 32), [])
+        # The birth date picks one; the folder name is in NFD form (й as и + combining breve).
+        nfd = unicodedata.normalize('NFD', 'Петров Сергей 1980-05-01')
+        self.assertNotEqual(nfd, 'Петров Сергей 1980-05-01')
+        self.drop(worker, nfd + '/ecg')
+        self.assertEqual(len(store.list_records('2' * 32)), 1)
+        # The same ECG in another patient's folder is an error, not a silent second copy.
+        self.drop(worker, 'Сидоров Олег/ecg')
+        self.assertIn('другого пациента', worker.status()['recent'][-1]['error'])
+        self.assertEqual(len(store.list_patients()), 2)
+
+    def test_non_finite_voltage_like_the_app(self):
+        blob = bytearray(self.ecg.read_bytes())
+        struct.pack_into('<f', blob, 24459, float('inf'))
+        record = record_from_ecg301(bytes(blob), 'x')
+        self.assertIsNone(record['device']['RV5_mV'])
+        self.assertNotIn('RV5_mV', record['measurements'])
+        self.assertNotIn('sokolow_mV', record['measurements'])
+
     def test_partial_download_is_ignored(self):
-        worker = FolderWorker(PatientStore(self.dir / 'store'), self.dir / 'exchange')
+        worker = FolderWorker(PatientStore(self.dir / 'store'), self.dir / 'exchange', partial_wait=0)
         worker.start()
         worker.stop()
         part = worker.root / INBOX / 'Иванов Иван/ecg.part'
@@ -110,6 +141,18 @@ class FolderWorkerTest(unittest.TestCase):
 
 
 class ExchangeApiTest(unittest.TestCase):
+    def test_unreachable_folder_does_not_stop_the_program(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder_worker.save_settings(temp, exchange_enabled=True, exchange_folder=temp + '/unmounted-drive/CardioAI')
+            server = LocalServer(0, Path(temp))
+            try:
+                status = server.exchange_status()
+                self.assertFalse(status['enabled'])
+                self.assertIn('недоступна', status['error'])
+                self.assertFalse(Path(temp, 'unmounted-drive').exists())
+            finally:
+                server.server_close()
+
     def test_turn_on_and_off(self):
         with tempfile.TemporaryDirectory() as temp:
             server = LocalServer(0, Path(temp))
@@ -132,7 +175,8 @@ class ExchangeApiTest(unittest.TestCase):
                 self.assertEqual((status, value['enabled']), (200, False))
                 self.assertEqual(call({'enabled': True}, token=False)[0], 403)
                 self.assertEqual(call({'enabled': True, 'folder': 'relative/path'})[0], 400)
-                status, value = call({'enabled': True})
+                self.assertEqual(call({'enabled': True, 'folder': temp + '/missing/parent'})[0], 400)
+                status, value = call({'enabled': True, 'folder': temp + '/exchange'})
                 self.assertEqual((status, value['enabled'], value['running']), (200, True, True))
                 self.assertTrue((Path(value['folder']) / INBOX).is_dir())
                 self.assertTrue(folder_worker.load_settings(temp)['exchange_enabled'])

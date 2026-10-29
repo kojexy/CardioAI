@@ -3,6 +3,8 @@ name: Full install test (program + neural networks)
 # (about 3.5 GB of downloads) and runs the self-test of all three models.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'  # weekly: unpinned sub-dependencies or downloads may change under us
   push:
     branches: [main, 'feature/**']
     paths:

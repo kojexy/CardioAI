@@ -20,7 +20,7 @@ import webbrowser
 
 from ecg_reader import LEADS
 from patient_store import PatientStore
-from model_setup import ModelSetup, runtime_python, work_dir
+from model_setup import ModelSetup, clean_env, packages_ready, runtime_python, work_dir
 import folder_worker
 
 # In a packaged desktop build the module sits at the bundle root; resources keep repo layout.
@@ -38,7 +38,7 @@ def upstream_thresholds():
     """Per-label DeepECG operating points from the installed upstream (not redistributed here)."""
     path = work_dir() / 'DeepECG_Docker/thresholds/77_tasks_final.json'
     try:
-        table = strict_json(path.read_text())
+        table = strict_json(path.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return {}
     out = {'efficientnet': {}, 'wcr': {}}
@@ -123,54 +123,70 @@ class LocalServer(ThreadingHTTPServer):
         self.slot = threading.BoundedSemaphore(1)
         for entry in sorted(self.runs.glob('*/job.json')):
             try:
-                job = strict_json(entry.read_text())
+                job = strict_json(entry.read_text(encoding='utf-8'))
                 if not isinstance(job, dict) or job.get('id') != entry.parent.name:
                     continue
                 uuid.UUID(hex=job['id'])
                 if job.get('state') == 'running':
                     job.update(state='failed', error='Расчёт прерван при остановке программы')
                 if job.get('state') == 'complete':
-                    job['report'] = strict_json((entry.parent / 'result.json').read_text())
+                    job['report'] = strict_json((entry.parent / 'result.json').read_text(encoding='utf-8'))
                 self.jobs[job['id']] = job
             except (OSError, ValueError, KeyError, TypeError):
                 continue
         self.exchange = None
+        self.exchange_lock = threading.Lock()
+        self.exchange_error = None
         settings = folder_worker.load_settings(self.runs)
-        if settings.get('exchange_enabled') or os.environ.get('CARDIOAI_EXCHANGE') == '1':
-            self.set_exchange(True, settings.get('exchange_folder'))
+        from_env = os.environ.get('CARDIOAI_EXCHANGE') == '1'
+        if settings.get('exchange_enabled') or from_env:
+            try:
+                # The --exchange flag works for this run only; it does not change the saved setting.
+                self.set_exchange(True, settings.get('exchange_folder'), persist=not from_env)
+            except (OSError, ValueError) as exc:
+                # A missing network or cloud drive must not stop the rest of the program.
+                self.exchange_error = 'Папка обмена недоступна: ' + str(exc)
 
-    def set_exchange(self, enabled, folder=None):
+    def set_exchange(self, enabled, folder=None, persist=True):
         """Turn the exchange folder on or off (see folder_worker.py); remembered in settings.json."""
         if folder is not None and not isinstance(folder, str):
             raise ValueError('Некорректная папка')
-        folder = Path(folder).expanduser() if folder else folder_worker.default_folder(self.runs)
+        folder = Path(folder).expanduser() if folder else folder_worker.default_folder()
         if not folder.is_absolute():
             raise ValueError('Укажите полный путь к папке')
-        with self.lock:
-            if self.exchange:
-                self.exchange.stop()
-                self.exchange = None
+        with self.exchange_lock:  # not self.lock: stopping may wait for a scan to finish
+            old, self.exchange = self.exchange, None
+            if old and not old.stop():
+                self.exchange = old
+                raise BlockingIOError('Папка обмена ещё обрабатывает файл. Повторите через минуту.')
+            self.exchange_error = None
             if enabled:
-                self.exchange = folder_worker.FolderWorker(self.store, folder)
-                self.exchange.start()
-        folder_worker.save_settings(self.runs, exchange_enabled=bool(enabled), exchange_folder=str(folder))
+                worker = folder_worker.FolderWorker(self.store, folder)
+                worker.start()
+                self.exchange = worker
+        if persist:
+            folder_worker.save_settings(self.runs, exchange_enabled=bool(enabled), exchange_folder=str(folder))
         return self.exchange_status()
 
     def exchange_status(self):
-        with self.lock:
-            if self.exchange:
-                return dict(self.exchange.status(), enabled=True)
-        folder = folder_worker.load_settings(self.runs).get('exchange_folder') or str(folder_worker.default_folder(self.runs))
-        return dict(enabled=False, running=False, folder=folder, error=None, recent=[])
+        worker = self.exchange
+        if worker:
+            return dict(worker.status(), enabled=True)
+        folder = folder_worker.load_settings(self.runs).get('exchange_folder') or str(folder_worker.default_folder())
+        return dict(enabled=False, running=False, folder=folder, error=self.exchange_error, recent=[],
+                    cloud=folder_worker.looks_like_cloud(folder))
 
     def save_job(self, job_id):
         job = {k:v for k,v in self.jobs[job_id].items() if k != 'report'}
         target = self.runs / job_id / 'job.json'
         temp = target.with_suffix('.tmp')
-        temp.write_text(json.dumps(job, ensure_ascii=False, indent=2))
+        temp.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding='utf-8')
         temp.replace(target)
 
     def server_close(self):
+        self.setup.stop()
+        if self.exchange:
+            self.exchange.stop()
         with self.lock:
             self.stopping = True
             for child in tuple(self.children):
@@ -180,7 +196,9 @@ class LocalServer(ThreadingHTTPServer):
 
     def models(self):
         work = work_dir()
-        if model_python() is None:
+        python = model_python()
+        # The program's own Python counts only with the packages of the current requirements.txt.
+        if python is None or (python == str(runtime_python(work)) and not packages_ready(work)):
             return {'efficientnet': False, 'wcr': False, 'ecgfounder': False}
         weights = work / 'deepecg-weights'
         names = {'efficientnet': ['efficientnet_deepecg_unscaled.pt'],
@@ -198,6 +216,8 @@ class LocalServer(ThreadingHTTPServer):
         mode = data.get('mode')
         if model not in ('efficientnet', 'wcr', 'ecgfounder') or mode not in ('self_test', 'prepared'):
             raise ValueError('Неизвестная модель или режим')
+        if self.setup.status()['running']:
+            raise BlockingIOError('Идёт установка нейросетей. Дождитесь её окончания.')
         if not self.models()[model]:
             raise ValueError('Весов выбранной модели нет в локальном окружении')
         if not self.slot.acquire(blocking=False):
@@ -224,7 +244,7 @@ class LocalServer(ThreadingHTTPServer):
             folder.mkdir(mode=0o700)
             if raw is not None:
                 (folder / 'signal_mV_250Hz.npy').write_bytes(raw)
-                (folder / 'provenance.json').write_text(json.dumps(meta, ensure_ascii=False, indent=2))
+                (folder / 'provenance.json').write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
             with self.lock:
                 self.jobs[job_id] = dict(id=job_id, state='running', model=model,
                                          synthetic=(mode == 'self_test' or (meta is not None and meta.get('synthetic_input') is True)),
@@ -248,11 +268,11 @@ class LocalServer(ThreadingHTTPServer):
                        [python, str(scripts / 'deepecg_run_local.py'), '--model', model])
             command += ['--report', str(folder / 'result.json')]
             command += ['--smoke-test'] if mode == 'self_test' else ['--input-dir', str(folder)]
-            with (folder / 'run.log').open('w') as log:
+            with (folder / 'run.log').open('w', encoding='utf-8', errors='replace') as log:
                 with self.lock:
                     if self.stopping:
                         raise RuntimeError('Локальная программа остановлена')
-                    env = dict(os.environ, CARDIOAI_WORK=str(work_dir()), PYTHONDONTWRITEBYTECODE='1')
+                    env = clean_env()
                     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)
                     self.children.add(process)
                 try:
@@ -263,7 +283,7 @@ class LocalServer(ThreadingHTTPServer):
                     raise RuntimeError('Превышено время расчёта — 10 минут') from None
             if returncode:
                 raise RuntimeError('Модель завершилась с ошибкой. Подробности — в журнале.')
-            report = strict_json((folder / 'result.json').read_text())
+            report = strict_json((folder / 'result.json').read_text(encoding='utf-8'))
             with self.lock:
                 self.jobs[job_id].update(state='complete', report=report)
                 self.save_job(job_id)
@@ -330,12 +350,14 @@ class Handler(BaseHTTPRequestHandler):
             self.get()
         except OSError:
             self.answer(404, {'error': 'Файл недоступен в этой установке'})
+        except Exception as exc:  # answer instead of dropping the connection
+            self.answer(500, {'error': 'Внутренняя ошибка программы: ' + type(exc).__name__})
 
     def get(self):
         if not self.allowed_host():
             return self.answer(403, {'error': 'Недопустимый адрес сервера'})
         if self.path == '/':
-            html = (APP / 'DeepECG-local.html').read_text().replace('__TOKEN__', self.server.token)
+            html = (APP / 'DeepECG-local.html').read_text(encoding='utf-8').replace('__TOKEN__', self.server.token)
             return self.respond(200, html, 'text/html; charset=utf-8')
         if self.path == '/api/status':
             return self.answer(200, dict(app='ECG301-DeepECG-local', version=4,
@@ -448,15 +470,24 @@ class Handler(BaseHTTPRequestHandler):
                 report = audit_record(path)
                 report['source_filename'] = Path(name).name[:200]
                 report['original_preserved'] = True
-                (folder / 'audit.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+                (folder / 'audit.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
                 return self.answer(200, report)
             if self.path == '/api/run':
                 return self.answer(202, self.server.start_job(data))
             if self.path == '/api/setup/start':
                 self.server.setup.start()
                 return self.answer(202, self.server.setup.status(self.server.models()))
+            if self.path == '/api/setup/cancel':
+                self.server.setup.stop()
+                return self.answer(200, self.server.setup.status(self.server.models()))
             if self.path == '/api/exchange':
                 return self.answer(200, self.server.set_exchange(data.get('enabled') is True, data.get('folder')))
+            if self.path == '/api/exchange/open':
+                folder = Path(self.server.exchange_status()['folder'])
+                if not folder.is_dir():
+                    raise ValueError('Папка ещё не создана — включите папку обмена')
+                folder_worker.open_in_file_manager(folder)
+                return self.answer(200, {'ok': True})
             if self.path == '/api/store/patient':
                 return self.answer(200, self.server.store.save_patient(data))
             if self.path == '/api/store/record':
@@ -467,7 +498,7 @@ class Handler(BaseHTTPRequestHandler):
         except BlockingIOError as exc:
             self.answer(409, {'error': str(exc)})
         except ImportError:
-            self.answer(400, {'error': 'Эта функция требует полной установки CardioAI с Python и моделями (см. README)'})
+            self.answer(400, {'error': 'Эта функция пока доступна только в версии из исходников (нужны numpy и scipy, см. README)'})
         except (ValueError, TypeError, KeyError, UnicodeError, OSError) as exc:
             self.answer(400, {'error': str(exc)})
 

@@ -60,7 +60,9 @@ def main():
 
     temp = Path(tempfile.mkdtemp(prefix='cardioai-ci-'))
     port = free_port()
-    env = dict(os.environ, CARDIOAI_DATA=str(temp / 'data'), CARDIOAI_WORK=str(temp / 'work'), CARDIOAI_PORT=str(port))
+    env = dict(os.environ, CARDIOAI_DATA=str(temp / 'data'), CARDIOAI_PORT=str(port))
+    if args.install:
+        env['CARDIOAI_WORK'] = str(temp / 'work')  # otherwise the program chooses it, as for a user
     log = (temp / 'program.log').open('w')
     program = subprocess.Popen([args.program, '--headless'], env=env, stdout=log, stderr=subprocess.STDOUT)
     client = Client(port)
@@ -85,9 +87,21 @@ def main():
             raise SystemExit('Patient was not stored')
         print('app page and storage: ok')
 
+        # The model page has Russian text: on Windows this broke without UTF-8 mode.
+        if 'DeepECG' not in client.get('/', raw=True):
+            raise SystemExit('Model page is wrong')
+        exchange = client.post('/api/exchange', {'enabled': True, 'folder': str(temp / 'exchange')})
+        if not (exchange['running'] and (temp / 'exchange' / 'Входящие').is_dir()):
+            raise SystemExit('Exchange folder did not start: ' + json.dumps(exchange, ensure_ascii=False))
+        client.post('/api/exchange', {'enabled': False, 'folder': str(temp / 'exchange')})
+        print('model page and exchange folder: ok')
+
         setup = client.get('/api/setup')
         print('setup:', json.dumps(setup, ensure_ascii=False))
         if not args.install:
+            work = Path(setup['work_dir'])
+            if sys.platform == 'win32' and 'Roaming' in work.parts:
+                raise SystemExit('Models folder must not be in the roaming profile: ' + str(work))
             return
         client.post('/api/setup/start', {'confirm': True})
         last = ['']
