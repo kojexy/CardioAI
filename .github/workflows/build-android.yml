@@ -18,7 +18,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-      - uses: android-actions/setup-android@v3
+      # ubuntu-latest already has the Android SDK (ANDROID_HOME); setup-android@v3 fails on the removed 'tools' package.
       - name: Generate Android project
         run: |
           npm ci

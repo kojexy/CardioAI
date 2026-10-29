@@ -56,6 +56,7 @@ def main():
     parser.add_argument('program', help='CardioAI executable (inside the .app on macOS)')
     parser.add_argument('--install', action='store_true', help='install the neural networks and run all self-tests')
     args = parser.parse_args()
+    sys.stdout.reconfigure(encoding='utf-8')  # Windows consoles default to cp1252; messages are Russian
 
     temp = Path(tempfile.mkdtemp(prefix='cardioai-ci-'))
     port = free_port()
